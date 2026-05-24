@@ -28,3 +28,9 @@
 - 已创建并可用：`.venv-system/`，使用 `--system-site-packages` 复用系统 Python 包，并以 `--no-deps --no-build-isolation` 安装本项目。
 - 已验证可用：`fugue --help`、`music21`、`mido`、`pretty_midi`、`numpy`、`pandas`、`typer`、`torch`、`transformers`。
 - 当前缺失：`z3-solver`、`python-constraint`、`miditok`。这些需要后续在允许 PyPI/conda 访问的环境中安装，或改用系统已有的 `cvxpy`/`highspy`/自写 beam search 先完成 MVP。
+
+补充状态：
+
+- `.venv/` 中已经可导入 `z3-solver`、`python-constraint`、`miditok`。
+- `.venv/pyvenv.cfg` 已设置 `include-system-site-packages = true`，因此同一环境也能访问系统中的 `music21`、`mido`、`pretty_midi`、`torch` 等包。
+- 当前生成器没有强依赖 z3；它使用随机 beam-like sampling + rule scoring。这样即使 solver 不可用，核心生成路径仍能运行。
