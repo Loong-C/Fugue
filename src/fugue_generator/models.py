@@ -123,6 +123,12 @@ class VoiceLine:
             return None
         return max(candidates, key=lambda event: event.end).pitch
 
+    def next_pitch(self, t: float) -> int | None:
+        candidates = [event for event in self.events if event.pitch is not None and event.offset >= t - 1e-6]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda event: event.offset).pitch
+
     def next_event_start(self, t: float) -> float | None:
         starts = [event.offset for event in self.events if event.offset >= t - 1e-6]
         return min(starts) if starts else None
@@ -154,6 +160,11 @@ class FugueDiagnostics:
     voice_crossings: int
     range_violations: int
     strong_dissonances: int
+    monophonic_overlaps: int
+    rhythmic_grid_violations: int
+    short_note_count: int
+    melody_issues: int
+    vertical_clusters: int
     total_duration: float
     seed: int
     style_source: str
@@ -177,6 +188,11 @@ class FugueDiagnostics:
             "voice_crossings": self.voice_crossings,
             "range_violations": self.range_violations,
             "strong_dissonances": self.strong_dissonances,
+            "monophonic_overlaps": self.monophonic_overlaps,
+            "rhythmic_grid_violations": self.rhythmic_grid_violations,
+            "short_note_count": self.short_note_count,
+            "melody_issues": self.melody_issues,
+            "vertical_clusters": self.vertical_clusters,
             "total_duration": self.total_duration,
             "seed": self.seed,
             "style_source": self.style_source,

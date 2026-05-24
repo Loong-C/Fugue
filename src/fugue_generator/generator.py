@@ -86,6 +86,7 @@ class FugueGenerator:
         self._place_countersubjects(lines, entries, countersubject, key_context, specs)
         self._place_cadence(lines, key_context, total_duration)
         self._fill_all_gaps(lines, harmony, subject, request.temperature, rng, total_duration)
+        _coalesce_adjacent_events(lines)
 
         diagnostics = evaluate_voice_lines(
             lines,
@@ -168,7 +169,7 @@ class FugueGenerator:
             entries.append(
                 EntryPlan(
                     voice_index=stretto_voice,
-                    start=final_start + max(2.0, subject.duration * 0.5),
+                    start=_round_to_grid(final_start + max(2.0, subject.duration * 0.5), 0.5),
                     kind="answer",
                     key_name=key_context.name,
                     label="stretto answer",
@@ -352,6 +353,9 @@ class FugueGenerator:
         best: list[MusicalEvent] = []
         best_score = math.inf
         attempts = 10
+        line = lines[voice_index]
+        start_previous = line.previous_pitch(start)
+        end_next = line.next_pitch(end)
         for _ in range(attempts):
             candidate = self._sample_segment(
                 lines,
@@ -363,7 +367,7 @@ class FugueGenerator:
                 temperature,
                 rng,
             )
-            score = self._segment_penalty(lines, voice_index, candidate)
+            score = self._segment_penalty(lines, voice_index, candidate, start_previous, end_next)
             score += 0.35 * self._style_penalty(candidate)
             if score < best_score:
                 best = candidate
@@ -464,7 +468,7 @@ class FugueGenerator:
             key_context.snap_to_scale(proposed + 1),
             key_context.snap_to_scale(proposed - 1),
         }
-        candidates.update(chord[:])
+        candidates.update(_local_chord_candidates(chord, previous))
         for raw in range(previous - 9, previous + 10):
             snapped = key_context.snap_to_scale(raw)
             if spec.low <= snapped <= spec.high:
@@ -476,9 +480,7 @@ class FugueGenerator:
             strong_times = [t]
         crossing_times = _covered_grid_times(t, duration, 0.5)
         for pitch in candidates:
-            penalty = abs(pitch - previous) * 0.2
-            if abs(pitch - previous) > 7:
-                penalty += 6
+            penalty = _melodic_continuity_cost(previous, pitch)
             if strong and chord:
                 penalty += 0 if pitch in chord else 2.5
             for other_index, other_line in enumerate(lines):
@@ -493,10 +495,6 @@ class FugueGenerator:
                         penalty += 35
                     if interval == 0:
                         penalty += 30
-                    if other_index < voice_index and pitch >= other - 1:
-                        penalty += 25
-                    if other_index > voice_index and pitch <= other + 1:
-                        penalty += 25
                     other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
                     if other_previous is not None:
                         previous_interval = abs(previous - other_previous) % 12
@@ -505,13 +503,15 @@ class FugueGenerator:
                             if (pitch - previous) * (other - other_previous) > 0:
                                 penalty += 1000
                 for check_t in crossing_times:
+                    active_by_voice = [line.active_pitch(check_t) for line in lines]
+                    active_by_voice[voice_index] = pitch
+                    penalty += _sonority_spacing_cost(active_by_voice, voice_index)
                     other = other_line.active_pitch(check_t)
-                    if other is None:
-                        continue
-                    if other_index < voice_index and pitch >= other - 1:
-                        penalty += 35
-                    if other_index > voice_index and pitch <= other + 1:
-                        penalty += 35
+                    other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
+                    if other is not None and other_previous is not None:
+                        self_previous = previous if check_t - 0.5 < t - 1e-6 else pitch
+                        if _is_parallel_perfect_motion(self_previous, pitch, other_previous, other):
+                            penalty += 1000
             penalty += rng.random() * 0.5
             scored.append((penalty, pitch))
         return min(scored)[1]
@@ -521,18 +521,16 @@ class FugueGenerator:
         lines: list[VoiceLine],
         voice_index: int,
         segment: list[MusicalEvent],
+        start_previous: int | None = None,
+        end_next: int | None = None,
     ) -> float:
         penalty = 0.0
-        previous = None
+        previous = start_previous
         for event in segment:
             if event.pitch is None:
                 continue
             if previous is not None:
-                leap = abs(event.pitch - previous)
-                if leap > 7:
-                    penalty += leap
-                if leap == 0:
-                    penalty += 0.2
+                penalty += _melodic_continuity_cost(previous, event.pitch)
             for other_index, line in enumerate(lines):
                 if other_index == voice_index:
                     continue
@@ -547,14 +545,18 @@ class FugueGenerator:
                         penalty += 7
                     if interval == 0:
                         penalty += 10
+                    active_by_voice = [line.active_pitch(check_t) for line in lines]
+                    active_by_voice[voice_index] = event.pitch
+                    penalty += 0.35 * _sonority_spacing_cost(active_by_voice, voice_index)
                     if previous is not None:
                         other_previous = line.active_pitch(max(0.0, check_t - 0.5))
                         if other_previous is not None:
-                            previous_interval = abs(previous - other_previous) % 12
-                            if previous_interval in {0, 7} and interval in {0, 7}:
-                                if (event.pitch - previous) * (other - other_previous) > 0:
-                                    penalty += 200
+                            self_previous = previous if check_t - 0.5 < event.offset - 1e-6 else event.pitch
+                            if _is_parallel_perfect_motion(self_previous, event.pitch, other_previous, other):
+                                penalty += 200
             previous = event.pitch
+        if previous is not None and end_next is not None:
+            penalty += _melodic_continuity_cost(previous, end_next)
         return penalty
 
     def _style_penalty(self, segment: list[MusicalEvent]) -> float:
@@ -586,6 +588,28 @@ def _normalize_subject_length(subject: NoteSequence) -> NoteSequence:
     return NoteSequence(events, subject.name)
 
 
+def _coalesce_adjacent_events(lines: list[VoiceLine]) -> None:
+    for line in lines:
+        merged: list[MusicalEvent] = []
+        for event in sorted(line.events, key=lambda item: (item.offset, item.duration)):
+            if (
+                merged
+                and event.pitch == merged[-1].pitch
+                and event.label == merged[-1].label
+                and abs(event.offset - merged[-1].end) < 1e-6
+            ):
+                previous = merged[-1]
+                merged[-1] = MusicalEvent(
+                    previous.offset,
+                    previous.duration + event.duration,
+                    previous.pitch,
+                    previous.label,
+                )
+            else:
+                merged.append(event)
+        line.events = merged
+
+
 def _default_measures(subject_duration: float, voices: int) -> int:
     return max(28, min(56, int(math.ceil((subject_duration * (voices + 7) + 48) / 4))))
 
@@ -595,8 +619,14 @@ def _ceil_to_measure(value: float) -> float:
 
 
 def _fit_duration_to_grid(duration: float, remaining: float) -> float:
-    value = max(0.25, round(duration * 4) / 4)
+    if remaining < 0.5:
+        return max(0.25, round(remaining * 4) / 4)
+    value = max(0.5, round(duration * 2) / 2)
     return min(value, remaining)
+
+
+def _round_to_grid(value: float, grid: float) -> float:
+    return round(value / grid) * grid
 
 
 def _parse_key_name(name: str) -> KeyContext:
@@ -636,6 +666,72 @@ def _covered_grid_times(start: float, duration: float, grid: float) -> list[floa
     first = math.ceil((start - 1e-6) / grid)
     last = math.floor((start + duration - 1e-6) / grid)
     return [round(i * grid, 6) for i in range(first, last + 1)]
+
+
+def _local_chord_candidates(chord: list[int], previous: int, span: int = 9) -> set[int]:
+    local = {pitch for pitch in chord if abs(pitch - previous) <= span}
+    if local or not chord:
+        return local
+    return {min(chord, key=lambda pitch: abs(pitch - previous))}
+
+
+def _melodic_continuity_cost(previous: int, current: int) -> float:
+    leap = abs(current - previous)
+    if leap == 0:
+        return 4.0
+    cost = leap * 0.25
+    if leap > 7:
+        cost += (leap - 7) * 4.0
+    if leap > 12:
+        cost += (leap - 12) * 80.0
+    return cost
+
+
+def _is_parallel_perfect_motion(
+    previous: int,
+    current: int,
+    other_previous: int,
+    other_current: int,
+) -> bool:
+    previous_interval = abs(previous - other_previous) % 12
+    current_interval = abs(current - other_current) % 12
+    return (
+        previous_interval in {0, 7}
+        and current_interval in {0, 7}
+        and (current - previous) * (other_current - other_previous) > 0
+    )
+
+
+def _sonority_spacing_cost(
+    active_by_voice: list[int | None],
+    voice_index: int,
+) -> float:
+    active = sorted((pitch for pitch in active_by_voice if pitch is not None), reverse=True)
+    if len(active) < 2:
+        return 0.0
+    cost = 0.0
+    for upper, lower in zip(active, active[1:]):
+        gap = upper - lower
+        if gap < 3:
+            cost += (3 - gap) * 80
+        elif gap > 19:
+            cost += (gap - 19) * 4
+
+    proposed_pitch = active_by_voice[voice_index]
+    if proposed_pitch is not None:
+        for other_index, other in enumerate(active_by_voice):
+            if other_index == voice_index or other is None:
+                continue
+            if other_index < voice_index and proposed_pitch >= other - 1:
+                cost += 90
+            if other_index > voice_index and proposed_pitch <= other + 1:
+                cost += 90
+    return cost
+
+
+def _windows(values: list[int], size: int):
+    for index in range(0, len(values) - size + 1):
+        yield values[index : index + size]
 
 
 def _nearest_scale_degree_pitch(

@@ -48,6 +48,11 @@ def test_generate_three_voice_fugue_has_clean_entries(tmp_path: Path) -> None:
     assert fugue.diagnostics.parallel_fifths == 0
     assert fugue.diagnostics.parallel_octaves == 0
     assert fugue.diagnostics.range_violations == 0
+    assert fugue.diagnostics.monophonic_overlaps == 0
+    assert fugue.diagnostics.rhythmic_grid_violations == 0
+    assert fugue.diagnostics.short_note_count == 0
+    assert fugue.diagnostics.melody_issues == 0
+    assert fugue.diagnostics.vertical_clusters == 0
 
 
 def test_generate_four_voice_fugue_writes_midi(tmp_path: Path) -> None:
@@ -74,3 +79,8 @@ def test_generate_four_voice_fugue_writes_midi(tmp_path: Path) -> None:
     assert fugue.diagnostics.parallel_fifths == 0
     assert fugue.diagnostics.parallel_octaves == 0
     assert fugue.diagnostics.range_violations == 0
+    assert fugue.diagnostics.monophonic_overlaps == 0
+    assert fugue.diagnostics.rhythmic_grid_violations == 0
+    assert fugue.diagnostics.short_note_count == 0
+    assert fugue.diagnostics.melody_issues == 0
+    assert fugue.diagnostics.vertical_clusters == 0

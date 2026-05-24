@@ -19,11 +19,33 @@ def evaluate_voice_lines(
     voice_crossings = 0
     range_violations = 0
     strong_dissonances = 0
+    monophonic_overlaps = 0
+    rhythmic_grid_violations = 0
+    short_note_count = 0
+    melody_issues = 0
+    vertical_clusters = 0
 
     for voice in voices:
+        sorted_events = sorted(voice.events, key=lambda item: item.offset)
+        note_events = [event for event in sorted_events if event.pitch is not None]
         for event in voice.events:
             if event.pitch is not None and not (voice.spec.low <= event.pitch <= voice.spec.high):
                 range_violations += 1
+            if not _is_on_grid(event.offset, 0.25) or not _is_on_grid(event.duration, 0.25):
+                rhythmic_grid_violations += 1
+            if event.pitch is not None and event.duration < 0.5 - 1e-6:
+                short_note_count += 1
+        for first, second in zip(sorted_events, sorted_events[1:]):
+            if first.end > second.offset + 1e-6:
+                monophonic_overlaps += 1
+        melody_issues += _voice_melody_issues(note_events)
+
+    cluster_times = [round(i * 0.25, 6) for i in range(int(total_duration / 0.25) + 1)]
+    for t in cluster_times:
+        pitches = [voice.active_pitch(t) for voice in voices]
+        active = sorted(pitch for pitch in pitches if pitch is not None)
+        if _has_vertical_cluster(active):
+            vertical_clusters += 1
 
     times = [round(i * grid, 6) for i in range(int(total_duration / grid) + 1)]
     for idx in range(1, len(times)):
@@ -56,11 +78,16 @@ def evaluate_voice_lines(
 
     score = (
         1000.0
-        - 220.0 * parallel_fifths
-        - 260.0 * parallel_octaves
-        - 8.0 * voice_crossings
+        - 420.0 * parallel_fifths
+        - 480.0 * parallel_octaves
+        - 16.0 * voice_crossings
         - 100.0 * range_violations
         - 5.0 * strong_dissonances
+        - 200.0 * monophonic_overlaps
+        - 60.0 * rhythmic_grid_violations
+        - 25.0 * short_note_count
+        - 35.0 * melody_issues
+        - 80.0 * vertical_clusters
         + 20.0 * len(entries)
     )
     return FugueDiagnostics(
@@ -71,6 +98,11 @@ def evaluate_voice_lines(
         voice_crossings=voice_crossings,
         range_violations=range_violations,
         strong_dissonances=strong_dissonances,
+        monophonic_overlaps=monophonic_overlaps,
+        rhythmic_grid_violations=rhythmic_grid_violations,
+        short_note_count=short_note_count,
+        melody_issues=melody_issues,
+        vertical_clusters=vertical_clusters,
         total_duration=total_duration,
         seed=seed,
         style_source=style_source,
@@ -79,3 +111,38 @@ def evaluate_voice_lines(
 
 def with_output_path(diagnostics: FugueDiagnostics, output_path) -> FugueDiagnostics:
     return replace(diagnostics, output_path=output_path)
+
+
+def _is_on_grid(value: float, grid: float) -> bool:
+    return abs((value / grid) - round(value / grid)) < 1e-6
+
+
+def _voice_melody_issues(events) -> int:
+    if len(events) < 8:
+        return 1
+    pitches = [event.pitch for event in events if event.pitch is not None]
+    issues = 0
+    if len(set(pitches)) < 4:
+        issues += 1
+    repeated_run = 1
+    for previous, current in zip(pitches, pitches[1:]):
+        if current == previous:
+            repeated_run += 1
+            if repeated_run >= 5:
+                issues += 1
+        else:
+            repeated_run = 1
+        if abs(current - previous) > 12:
+            issues += 1
+    return issues
+
+
+def _has_vertical_cluster(pitches: list[int]) -> bool:
+    if len(pitches) < 3:
+        return False
+    return any(window[-1] - window[0] <= 4 for window in _windows(pitches, 3))
+
+
+def _windows(values: list[int], size: int):
+    for index in range(0, len(values) - size + 1):
+        yield values[index : index + size]

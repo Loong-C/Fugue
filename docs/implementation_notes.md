@@ -16,8 +16,15 @@ The current generator follows the hybrid route proposed in `feasibility_plan.md`
 - `Counterpoint generator`: `generator.py` fills free spans by stochastic sampling, then
   penalizes range errors, strong-beat dissonance, voice crossing, and parallel perfects.
   Candidate fragments are ranked by both rule cost and style negative log-likelihood.
+  Harmony candidates are kept local to the current melodic position, fragment boundaries
+  are scored against neighboring fixed entries, and parallel-perfect motion is checked on
+  the same half-beat grid used by the evaluator.
+  Adjacent identical free-note fragments are merged before export so voice lines sustain
+  naturally instead of stuttering.
 - `Evaluator`: `evaluate.py` reports entries, parallel fifths/octaves, crossings,
-  range violations, strong dissonances, total duration, seed, and style source.
+  range violations, strong dissonances, monophonic overlaps, rhythmic grid errors,
+  sub-half-beat notes, melody issues, vertical clusters, total duration, seed, and
+  style source.
 - `Exporter`: `export.py` writes MIDI and optional MusicXML through `music21`.
 
 This is not a neural end-to-end model. It is a corpus-trained probabilistic symbolic
@@ -37,12 +44,17 @@ Observed diagnostic from the current implementation:
 - Entries: 8.
 - Parallel fifths: 0.
 - Parallel octaves: 0.
-- Voice crossings: 4.
+- Voice crossings: 0.
 - Range violations: 0.
+- Monophonic overlaps: 0.
+- Rhythmic grid violations: 0.
+- Sub-half-beat notes: 0.
+- Melody issues: 0.
+- Vertical clusters: 0.
 - Strong dissonances: nonzero but limited; these include accented suspensions and rough spots
   from the stochastic free counterpoint layer.
-- Candidate diversity from `scripts/verify_generator.py --variants 8`: 8 entry plans,
-  8 score values, and 8 top-voice contours.
+- Candidate diversity from `scripts/verify_generator.py --variants 16`: 16 entry plans,
+  16 score values, and 16 top-voice contours.
 
 Three-voice smoke command:
 
@@ -57,21 +69,27 @@ Observed diagnostic:
 - Parallel octaves: 0.
 - Voice crossings: 0.
 - Range violations: 0.
-- Candidate diversity from `scripts/verify_generator.py --variants 8`: 8 entry plans,
-  7 score values, and 6 top-voice contours.
+- Monophonic overlaps: 0.
+- Rhythmic grid violations: 0.
+- Sub-half-beat notes: 0.
+- Melody issues: 0.
+- Vertical clusters: 0.
+- Candidate diversity from `scripts/verify_generator.py --variants 16`: 16 entry plans,
+  14 score values, and 13 top-voice contours.
 
 ## Verification Script
 
 Run:
 
 ```powershell
-.\.venv\Scripts\python scripts\verify_generator.py --variants 8
+.\.venv\Scripts\python scripts\verify_generator.py --variants 16
 ```
 
 The script generates 4-voice and 3-voice fugues, parses the MIDI outputs with `music21`,
 and fails if the best candidate has parallel fifths, parallel octaves, range violations,
-too few entries, or insufficient candidate diversity. It writes outputs to
-`out/verification/`.
+monophonic overlaps, rhythmic grid instability, sub-half-beat notes, weak voice-line
+melody metrics, vertical clusters, too few entries, or insufficient candidate diversity.
+It writes outputs to `out/verification/`.
 
 ## Known Limitations
 
@@ -79,7 +97,8 @@ too few entries, or insufficient candidate diversity. It writes outputs to
   add a small inpainting/ranking network, but the present architecture already leaves a
   clean insertion point for that.
 - The generator produces a short school fugue, not a Bach-level fugue.
-- Some generated candidates can still have voice crossings or accented dissonances; use
-  higher `--variants` and lower `--temperature` for stricter results.
+- Some non-selected candidates can still have voice crossings or accented dissonances;
+  the selected best candidate is checked by the verifier. Use higher `--variants` and
+  lower `--temperature` for stricter results.
 - The default text subject format is convenient for tests and examples. MIDI/MusicXML
   subjects are supported through `music21`.

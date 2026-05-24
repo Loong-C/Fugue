@@ -75,6 +75,16 @@ def _quality_failures(
         failures.append(f"{request.voices}-voice fugue has parallel octaves: {diag.parallel_octaves}")
     if diag.range_violations != 0:
         failures.append(f"{request.voices}-voice fugue has range violations: {diag.range_violations}")
+    if diag.monophonic_overlaps != 0:
+        failures.append(f"{request.voices}-voice fugue has overlapping notes in a voice")
+    if diag.rhythmic_grid_violations != 0:
+        failures.append(f"{request.voices}-voice fugue has unstable rhythmic grid positions")
+    if diag.short_note_count != 0:
+        failures.append(f"{request.voices}-voice fugue has sub-half-beat notes")
+    if diag.melody_issues != 0:
+        failures.append(f"{request.voices}-voice fugue has weak voice-line melody metrics")
+    if diag.vertical_clusters != 0:
+        failures.append(f"{request.voices}-voice fugue has vertical tone clusters")
     if request.voices == 3 and diag.voice_crossings != 0:
         failures.append(f"3-voice fugue has voice crossings: {diag.voice_crossings}")
     if diversity["entry_plans"] < min(3, request.variants):
