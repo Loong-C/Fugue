@@ -8,6 +8,7 @@ import typer
 from .evaluate import with_output_path
 from .export import write_midi, write_musicxml
 from .generator import FugueGenerator, FugueRequest
+from .style import CorpusStyleModel
 from .subject import load_subject, subject_summary
 from .theory import KeyContext
 
@@ -101,6 +102,22 @@ def generate(
 def inspect_subject(subject: str) -> None:
     """Print a compact summary of a subject file."""
     typer.echo(json.dumps(subject_summary(load_subject(subject)), indent=2))
+
+
+@app.command("build-style-profile")
+def build_style_profile() -> None:
+    """Rebuild the corpus Markov profile used by the stochastic generator."""
+    model = CorpusStyleModel.load(Path.cwd(), rebuild=True)
+    typer.echo(f"Built style profile from {model.source}")
+    typer.echo(
+        "intervals={intervals} durations={durations} interval_transitions={it} "
+        "duration_transitions={dt}".format(
+            intervals=len(model.interval_weights),
+            durations=len(model.duration_weights),
+            it=len(model.interval_transitions),
+            dt=len(model.duration_transitions),
+        )
+    )
 
 
 def main() -> None:

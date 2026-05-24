@@ -22,7 +22,7 @@ def _test_style() -> CorpusStyleModel:
     return CorpusStyleModel(
         dict(DEFAULT_INTERVAL_WEIGHTS),
         dict(DEFAULT_DURATION_WEIGHTS),
-        "test",
+        source="test",
     )
 
 
@@ -74,4 +74,3 @@ def test_generate_four_voice_fugue_writes_midi(tmp_path: Path) -> None:
     assert fugue.diagnostics.parallel_fifths == 0
     assert fugue.diagnostics.parallel_octaves == 0
     assert fugue.diagnostics.range_violations == 0
-

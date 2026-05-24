@@ -56,8 +56,8 @@ def evaluate_voice_lines(
 
     score = (
         1000.0
-        - 55.0 * parallel_fifths
-        - 65.0 * parallel_octaves
+        - 220.0 * parallel_fifths
+        - 260.0 * parallel_octaves
         - 8.0 * voice_crossings
         - 100.0 * range_violations
         - 5.0 * strong_dissonances
@@ -79,4 +79,3 @@ def evaluate_voice_lines(
 
 def with_output_path(diagnostics: FugueDiagnostics, output_path) -> FugueDiagnostics:
     return replace(diagnostics, output_path=output_path)
-

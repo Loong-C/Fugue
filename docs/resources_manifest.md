@@ -33,4 +33,5 @@
 
 - `.venv/` 中已经可导入 `z3-solver`、`python-constraint`、`miditok`。
 - `.venv/pyvenv.cfg` 已设置 `include-system-site-packages = true`，因此同一环境也能访问系统中的 `music21`、`mido`、`pretty_midi`、`torch` 等包。
-- 当前生成器没有强依赖 z3；它使用随机 beam-like sampling + rule scoring。这样即使 solver 不可用，核心生成路径仍能运行。
+- 当前生成器没有强依赖 z3；它使用随机 beam-like sampling + rule scoring，再结合从 JSB chorales 和 WTC fugue 声部数据训练出的 Markov 风格 profile。这样即使 solver 不可用，核心生成路径仍能运行。
+- 可用 `.\.venv\Scripts\fugue build-style-profile` 重建 `data/processed/style_profile.json`。该缓存被 git 忽略，可从原始数据复现。

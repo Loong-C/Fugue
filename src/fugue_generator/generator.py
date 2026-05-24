@@ -364,6 +364,7 @@ class FugueGenerator:
                 rng,
             )
             score = self._segment_penalty(lines, voice_index, candidate)
+            score += 0.35 * self._style_penalty(candidate)
             if score < best_score:
                 best = candidate
                 best_score = score
@@ -387,11 +388,18 @@ class FugueGenerator:
         previous = line.previous_pitch(t)
         if previous is None:
             previous = spec.center
+        previous_interval: int | None = None
+        previous_duration: float | None = None
         subject_intervals = _subject_intervals(subject)
         while t < end - 1e-6:
             remaining = end - t
             duration = _fit_duration_to_grid(
-                self.style_model.sample_duration(rng, remaining, temperature),
+                self.style_model.sample_duration(
+                    rng,
+                    remaining,
+                    temperature,
+                    previous_duration=previous_duration,
+                ),
                 remaining,
             )
             section = _section_at(harmony, t)
@@ -410,7 +418,11 @@ class FugueGenerator:
                 interval = (
                     rng.choice(subject_intervals)
                     if subject_intervals and rng.random() < 0.25
-                    else self.style_model.sample_interval(rng, temperature)
+                    else self.style_model.sample_interval(
+                        rng,
+                        temperature,
+                        previous_interval=previous_interval,
+                    )
                 )
                 pitch = key_context.snap_to_scale(previous + int(interval))
                 pitch = _fold_into_range(pitch, spec.low, spec.high)
@@ -427,6 +439,8 @@ class FugueGenerator:
                 rng,
             )
             events.append(MusicalEvent(t, duration, pitch, "free counterpoint"))
+            previous_interval = int(pitch - previous)
+            previous_duration = duration
             previous = pitch
             t = round(t + duration, 6)
         return events
@@ -489,7 +503,7 @@ class FugueGenerator:
                         current_interval = abs(pitch - other) % 12
                         if previous_interval in {0, 7} and current_interval in {0, 7}:
                             if (pitch - previous) * (other - other_previous) > 0:
-                                penalty += 60
+                                penalty += 1000
                 for check_t in crossing_times:
                     other = other_line.active_pitch(check_t)
                     if other is None:
@@ -522,7 +536,9 @@ class FugueGenerator:
             for other_index, line in enumerate(lines):
                 if other_index == voice_index:
                     continue
-                for check_t in _covered_strong_times(event.offset, event.duration):
+                check_times = set(_covered_strong_times(event.offset, event.duration))
+                check_times.update(_covered_grid_times(event.offset, event.duration, 0.5))
+                for check_t in sorted(check_times):
                     other = line.active_pitch(check_t)
                     if other is None:
                         continue
@@ -537,9 +553,16 @@ class FugueGenerator:
                             previous_interval = abs(previous - other_previous) % 12
                             if previous_interval in {0, 7} and interval in {0, 7}:
                                 if (event.pitch - previous) * (other - other_previous) > 0:
-                                    penalty += 20
+                                    penalty += 200
             previous = event.pitch
         return penalty
+
+    def _style_penalty(self, segment: list[MusicalEvent]) -> float:
+        pitches = [event.pitch for event in segment if event.pitch is not None]
+        durations = [event.duration for event in segment if event.pitch is not None]
+        if len(pitches) < 2:
+            return 0.0
+        return self.style_model.style_penalty(pitches, durations)
 
     def _place_sequence(self, line: VoiceLine, sequence: NoteSequence, start: float, label: str) -> None:
         for event in sequence.events:

@@ -14,7 +14,8 @@ Current state:
   both the locally added solver/tokenization packages and the system music/ML packages.
 - The generator is implemented as a hybrid symbolic/statistical engine: form planning and
   entry placement are explicit, while free counterpoint and episodes are sampled from a
-  corpus-trained style profile and then rule-scored.
+  corpus-trained Markov style profile and then rule-scored. The profile is trained from
+  JSB chorales plus the downloaded WTC fugue voice data when available.
 
 Planned CLI shape:
 
@@ -49,5 +50,11 @@ Useful commands:
 
 ```powershell
 .\.venv\Scripts\fugue inspect-subject examples\subjects\c_minor_subject.theme
+.\.venv\Scripts\fugue build-style-profile
+.\.venv\Scripts\python scripts\verify_generator.py --variants 8
 .\.venv\Scripts\pytest
 ```
+
+The verifier writes MIDI examples and a JSON quality report under `out/verification/`.
+It checks parseability, entry count, zero parallel fifths/octaves in the selected best
+candidates, range safety, and candidate diversity.
