@@ -164,6 +164,8 @@ class FugueDiagnostics:
     rhythmic_grid_violations: int
     short_note_count: int
     melody_issues: int
+    free_stagnation_issues: int
+    free_rhythm_issues: int
     vertical_clusters: int
     total_duration: float
     seed: int
@@ -192,6 +194,8 @@ class FugueDiagnostics:
             "rhythmic_grid_violations": self.rhythmic_grid_violations,
             "short_note_count": self.short_note_count,
             "melody_issues": self.melody_issues,
+            "free_stagnation_issues": self.free_stagnation_issues,
+            "free_rhythm_issues": self.free_rhythm_issues,
             "vertical_clusters": self.vertical_clusters,
             "total_duration": self.total_duration,
             "seed": self.seed,

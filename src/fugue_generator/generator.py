@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .evaluate import evaluate_voice_lines, with_output_path
-from .models import EntryPlan, GeneratedFugue, HarmonySection, MusicalEvent, NoteSequence, VoiceLine
+from .models import EntryPlan, GeneratedFugue, HarmonySection, MusicalEvent, NoteSequence, VoiceLine, VoiceSpec
 from .style import CorpusStyleModel
 from .subject import load_subject
 from .theory import (
@@ -28,7 +28,7 @@ class FugueRequest:
     subject_path: Path
     seed: int = 1
     temperature: float = 1.0
-    variants: int = 5
+    variants: int = 16
     measures: int | None = None
 
 
@@ -86,7 +86,6 @@ class FugueGenerator:
         self._place_countersubjects(lines, entries, countersubject, key_context, specs)
         self._place_cadence(lines, key_context, total_duration)
         self._fill_all_gaps(lines, harmony, subject, request.temperature, rng, total_duration)
-        _coalesce_adjacent_events(lines)
 
         diagnostics = evaluate_voice_lines(
             lines,
@@ -352,7 +351,7 @@ class FugueGenerator:
     ) -> list[MusicalEvent]:
         best: list[MusicalEvent] = []
         best_score = math.inf
-        attempts = 10
+        attempts = 1
         line = lines[voice_index]
         start_previous = line.previous_pitch(start)
         end_next = line.next_pitch(end)
@@ -366,9 +365,10 @@ class FugueGenerator:
                 subject,
                 temperature,
                 rng,
+                end_next,
             )
             score = self._segment_penalty(lines, voice_index, candidate, start_previous, end_next)
-            score += 0.35 * self._style_penalty(candidate)
+            score += 1.05 * self._style_penalty(candidate)
             if score < best_score:
                 best = candidate
                 best_score = score
@@ -384,6 +384,7 @@ class FugueGenerator:
         subject: NoteSequence,
         temperature: float,
         rng: random.Random,
+        end_next: int | None = None,
     ) -> list[MusicalEvent]:
         line = lines[voice_index]
         spec = line.spec
@@ -397,17 +398,111 @@ class FugueGenerator:
         subject_intervals = _subject_intervals(subject)
         while t < end - 1e-6:
             remaining = end - t
-            duration = _fit_duration_to_grid(
-                self.style_model.sample_duration(
+            cell_candidates: list[list[MusicalEvent]] = []
+            for _ in range(4):
+                cell = self.style_model.sample_cell(
                     rng,
                     remaining,
                     temperature,
+                    phase=t,
+                    previous_interval=previous_interval,
                     previous_duration=previous_duration,
+                )
+                candidate = self._events_from_cell(
+                    lines,
+                    voice_index,
+                    t,
+                    end,
+                    cell.durations,
+                    cell.intervals,
+                    harmony,
+                    spec,
+                    previous,
+                    previous_interval,
+                    previous_duration,
+                    subject_intervals,
+                    rng,
+                )
+                if candidate:
+                    cell_candidates.append(candidate)
+
+            if not cell_candidates:
+                duration = _fit_duration_to_grid(
+                    self.style_model.sample_duration(
+                        rng,
+                        remaining,
+                        temperature,
+                        previous_duration=previous_duration,
+                        phase=t,
+                    ),
+                    remaining,
+                )
+                key_context = _parse_key_name(_section_at(harmony, t).key_name)
+                interval = self.style_model.sample_interval(
+                    rng,
+                    temperature,
+                    previous_interval=previous_interval,
+                )
+                pitch = _fold_into_range(key_context.snap_to_scale(previous + int(interval)), spec.low, spec.high)
+                cell_candidates.append([MusicalEvent(t, duration, pitch, "free counterpoint")])
+
+            best_cell = min(
+                cell_candidates,
+                key=lambda candidate: self._cell_penalty(
+                    lines,
+                    voice_index,
+                    candidate,
+                    previous,
+                    previous_interval,
+                    previous_duration,
+                    end_next if candidate[-1].end >= end - 1e-6 else None,
                 ),
-                remaining,
             )
+            events.extend(best_cell)
+            for event in best_cell:
+                previous_interval = int(event.pitch - previous) if event.pitch is not None else previous_interval
+                previous_duration = event.duration
+                if event.pitch is not None:
+                    previous = event.pitch
+            t = round(best_cell[-1].end, 6)
+        return events
+
+    def _events_from_cell(
+        self,
+        lines: list[VoiceLine],
+        voice_index: int,
+        start: float,
+        end: float,
+        durations: tuple[float, ...],
+        intervals: tuple[int, ...],
+        harmony: list[HarmonySection],
+        spec: VoiceSpec,
+        previous: int,
+        previous_interval: int | None,
+        previous_duration: float | None,
+        subject_intervals: list[int],
+        rng: random.Random,
+    ) -> list[MusicalEvent]:
+        planned: list[tuple[float, float, int, int, list[int], bool, KeyContext]] = []
+        t = start
+        pitch_cursor = previous
+        for raw_duration, raw_interval in zip(durations, intervals):
+            if t >= end - 1e-6:
+                break
+            remaining = end - t
+            duration = _fit_duration_to_grid(raw_duration, remaining)
+            if duration < 0.5 - 1e-6:
+                break
+            interval = int(raw_interval)
+            if subject_intervals and rng.random() < 0.12:
+                interval = rng.choice(subject_intervals)
+            key_context = _parse_key_name(_section_at(harmony, t).key_name)
+            pitch = key_context.snap_to_scale(pitch_cursor + interval)
+            pitch = _fold_into_range(pitch, spec.low, spec.high)
+            if abs(pitch - pitch_cursor) > 12:
+                pitch = key_context.snap_to_scale(pitch_cursor - interval)
+                pitch = _fold_into_range(pitch, spec.low, spec.high)
             section = _section_at(harmony, t)
-            key_context = _parse_key_name(section.key_name)
             chord_degree = section.progression[int(((t - section.start) // 4) % len(section.progression))]
             chord = key_context.chord_pitches(
                 chord_degree,
@@ -415,106 +510,154 @@ class FugueGenerator:
                 spec.high,
                 include_seventh=chord_degree == 5,
             )
-            strong = abs(t % 1.0) < 1e-6
-            if strong and chord and rng.random() < 0.9:
-                pitch = min(chord, key=lambda item: abs(item - previous))
-            else:
-                interval = (
-                    rng.choice(subject_intervals)
-                    if subject_intervals and rng.random() < 0.25
-                    else self.style_model.sample_interval(
-                        rng,
-                        temperature,
-                        previous_interval=previous_interval,
-                    )
-                )
-                pitch = key_context.snap_to_scale(previous + int(interval))
-                pitch = _fold_into_range(pitch, spec.low, spec.high)
-            pitch = self._choose_local_pitch(
-                lines,
-                voice_index,
-                t,
-                duration,
-                pitch,
-                chord,
-                key_context,
-                previous,
-                strong,
-                rng,
-            )
-            events.append(MusicalEvent(t, duration, pitch, "free counterpoint"))
-            previous_interval = int(pitch - previous)
-            previous_duration = duration
-            previous = pitch
+            planned.append((t, duration, pitch, interval, chord, abs(t % 1.0) < 1e-6, key_context))
+            pitch_cursor = pitch
             t = round(t + duration, 6)
-        return events
+        if not planned:
+            return []
+        return self._decode_cell_path(
+            lines,
+            voice_index,
+            planned,
+            spec.low,
+            spec.high,
+            previous,
+            previous_interval,
+            previous_duration,
+        )
 
-    def _choose_local_pitch(
+    def _decode_cell_path(
+        self,
+        lines: list[VoiceLine],
+        voice_index: int,
+        planned: list[tuple[float, float, int, int, list[int], bool, KeyContext]],
+        low: int,
+        high: int,
+        previous: int,
+        previous_interval: int | None,
+        previous_duration: float | None,
+    ) -> list[MusicalEvent]:
+        states: list[tuple[float, list[int], int, int | None, float | None]] = [
+            (0.0, [], previous, previous_interval, previous_duration)
+        ]
+        for t, duration, proposed, intended_interval, chord, strong, key_context in planned:
+            next_states: list[tuple[float, list[int], int, int | None, float | None]] = []
+            for cost, path, prev_pitch, prev_interval, prev_duration in states:
+                for pitch in _cell_pitch_candidates(proposed, chord, key_context, low, high):
+                    interval = max(-12, min(12, int(pitch - prev_pitch)))
+                    pitch_cost = cost
+                    pitch_cost += 0.5 * _melodic_continuity_cost(prev_pitch, pitch)
+                    target = max(-12, min(12, int(intended_interval)))
+                    pitch_cost += 3.0 * self.style_model.interval_penalty(interval, prev_interval)
+                    pitch_cost += 2.7 * abs(interval - target)
+                    pitch_cost += 0.6 * self.style_model.duration_penalty(duration, prev_duration, phase=t)
+                    if strong and chord:
+                        pitch_cost += 0 if pitch in chord else 2.5
+                    pitch_cost += self._vertical_pitch_penalty(
+                        lines,
+                        voice_index,
+                        t,
+                        duration,
+                        pitch,
+                        prev_pitch,
+                    )
+                    next_states.append((pitch_cost, path + [pitch], pitch, interval, duration))
+            next_states.sort(key=lambda item: item[0])
+            states = next_states[:4]
+        intended_intervals = [interval for _, _, _, interval, _, _, _ in planned]
+        best_path = min(
+            states,
+            key=lambda item: item[0] + _cell_contour_loss(previous, item[1], intended_intervals),
+        )[1]
+        return [
+            MusicalEvent(t, duration, pitch, "free counterpoint")
+            for (t, duration, _, _, _, _, _), pitch in zip(planned, best_path)
+        ]
+
+    def _vertical_pitch_penalty(
         self,
         lines: list[VoiceLine],
         voice_index: int,
         t: float,
         duration: float,
-        proposed: int,
-        chord: list[int],
-        key_context: KeyContext,
+        pitch: int,
         previous: int,
-        strong: bool,
-        rng: random.Random,
-    ) -> int:
-        spec = lines[voice_index].spec
-        candidates = {
-            proposed,
-            key_context.snap_to_scale(proposed + 1),
-            key_context.snap_to_scale(proposed - 1),
-        }
-        candidates.update(_local_chord_candidates(chord, previous))
-        for raw in range(previous - 9, previous + 10):
-            snapped = key_context.snap_to_scale(raw)
-            if spec.low <= snapped <= spec.high:
-                candidates.add(snapped)
-        candidates = {_fold_into_range(candidate, spec.low, spec.high) for candidate in candidates}
-        scored = []
+    ) -> float:
+        penalty = 0.0
         strong_times = _covered_strong_times(t, duration)
         if not strong_times:
             strong_times = [t]
         crossing_times = _covered_grid_times(t, duration, 0.5)
-        for pitch in candidates:
-            penalty = _melodic_continuity_cost(previous, pitch)
-            if strong and chord:
-                penalty += 0 if pitch in chord else 2.5
-            for other_index, other_line in enumerate(lines):
-                if other_index == voice_index:
+        for other_index, other_line in enumerate(lines):
+            if other_index == voice_index:
+                continue
+            for check_t in strong_times:
+                other = other_line.active_pitch(check_t)
+                if other is None:
                     continue
-                for check_t in strong_times:
-                    other = other_line.active_pitch(check_t)
-                    if other is None:
-                        continue
-                    interval = abs(pitch - other) % 12
-                    if interval in {1, 2, 6, 10, 11}:
-                        penalty += 35
-                    if interval == 0:
-                        penalty += 30
-                    other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
-                    if other_previous is not None:
-                        previous_interval = abs(previous - other_previous) % 12
-                        current_interval = abs(pitch - other) % 12
-                        if previous_interval in {0, 7} and current_interval in {0, 7}:
-                            if (pitch - previous) * (other - other_previous) > 0:
-                                penalty += 1000
-                for check_t in crossing_times:
-                    active_by_voice = [line.active_pitch(check_t) for line in lines]
-                    active_by_voice[voice_index] = pitch
-                    penalty += _sonority_spacing_cost(active_by_voice, voice_index)
-                    other = other_line.active_pitch(check_t)
-                    other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
-                    if other is not None and other_previous is not None:
-                        self_previous = previous if check_t - 0.5 < t - 1e-6 else pitch
-                        if _is_parallel_perfect_motion(self_previous, pitch, other_previous, other):
+                interval = abs(pitch - other) % 12
+                if interval in {1, 2, 6, 10, 11}:
+                    penalty += 35
+                if interval == 0:
+                    penalty += 30
+                other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
+                if other_previous is not None:
+                    previous_interval = abs(previous - other_previous) % 12
+                    current_interval = abs(pitch - other) % 12
+                    if previous_interval in {0, 7} and current_interval in {0, 7}:
+                        if (pitch - previous) * (other - other_previous) > 0:
                             penalty += 1000
-            penalty += rng.random() * 0.5
-            scored.append((penalty, pitch))
-        return min(scored)[1]
+            for check_t in crossing_times:
+                active_by_voice = [line.active_pitch(check_t) for line in lines]
+                active_by_voice[voice_index] = pitch
+                penalty += _sonority_spacing_cost(active_by_voice, voice_index)
+                other = other_line.active_pitch(check_t)
+                other_previous = other_line.active_pitch(max(0.0, check_t - 0.5))
+                if other is not None and other_previous is not None:
+                    self_previous = previous if check_t - 0.5 < t - 1e-6 else pitch
+                    if _is_parallel_perfect_motion(self_previous, pitch, other_previous, other):
+                        penalty += 1000
+        return penalty
+
+    def _cell_penalty(
+        self,
+        lines: list[VoiceLine],
+        voice_index: int,
+        candidate: list[MusicalEvent],
+        previous: int | None,
+        previous_interval: int | None,
+        previous_duration: float | None,
+        end_next: int | None,
+    ) -> float:
+        penalty = 0.0
+        local_previous = previous
+        local_previous_interval = previous_interval
+        local_previous_duration = previous_duration
+        for event in candidate:
+            if event.pitch is None or local_previous is None:
+                continue
+            interval = int(event.pitch - local_previous)
+            penalty += 0.5 * _melodic_continuity_cost(local_previous, event.pitch)
+            penalty += 2.0 * self.style_model.interval_penalty(interval, local_previous_interval)
+            penalty += 0.8 * self.style_model.duration_penalty(
+                event.duration,
+                local_previous_duration,
+                phase=event.offset,
+            )
+            penalty += self._vertical_pitch_penalty(
+                lines,
+                voice_index,
+                event.offset,
+                event.duration,
+                event.pitch,
+                local_previous,
+            )
+            local_previous = event.pitch
+            local_previous_interval = interval
+            local_previous_duration = event.duration
+        if local_previous is not None and end_next is not None:
+            penalty += _melodic_continuity_cost(local_previous, end_next)
+        return penalty
 
     def _segment_penalty(
         self,
@@ -588,28 +731,6 @@ def _normalize_subject_length(subject: NoteSequence) -> NoteSequence:
     return NoteSequence(events, subject.name)
 
 
-def _coalesce_adjacent_events(lines: list[VoiceLine]) -> None:
-    for line in lines:
-        merged: list[MusicalEvent] = []
-        for event in sorted(line.events, key=lambda item: (item.offset, item.duration)):
-            if (
-                merged
-                and event.pitch == merged[-1].pitch
-                and event.label == merged[-1].label
-                and abs(event.offset - merged[-1].end) < 1e-6
-            ):
-                previous = merged[-1]
-                merged[-1] = MusicalEvent(
-                    previous.offset,
-                    previous.duration + event.duration,
-                    previous.pitch,
-                    previous.label,
-                )
-            else:
-                merged.append(event)
-        line.events = merged
-
-
 def _default_measures(subject_duration: float, voices: int) -> int:
     return max(28, min(56, int(math.ceil((subject_duration * (voices + 7) + 48) / 4))))
 
@@ -668,11 +789,49 @@ def _covered_grid_times(start: float, duration: float, grid: float) -> list[floa
     return [round(i * grid, 6) for i in range(first, last + 1)]
 
 
-def _local_chord_candidates(chord: list[int], previous: int, span: int = 9) -> set[int]:
-    local = {pitch for pitch in chord if abs(pitch - previous) <= span}
-    if local or not chord:
-        return local
-    return {min(chord, key=lambda pitch: abs(pitch - previous))}
+def _cell_pitch_candidates(
+    proposed: int,
+    chord: list[int],
+    key_context: KeyContext,
+    low: int,
+    high: int,
+) -> set[int]:
+    candidates = {proposed}
+    for raw in range(proposed - 5, proposed + 6):
+        candidates.add(key_context.snap_to_scale(raw))
+    candidates.update(pitch for pitch in chord if abs(pitch - proposed) <= 5)
+    candidates = {pitch for pitch in candidates if low <= pitch <= high}
+    if candidates:
+        return candidates
+    return {_fold_into_range(proposed, low, high)}
+
+
+def _cell_contour_loss(previous: int, path: list[int], intended_intervals: list[int]) -> float:
+    if not path:
+        return 0.0
+    actual_intervals = [path[0] - previous]
+    actual_intervals.extend(current - before for before, current in zip(path, path[1:]))
+
+    intended_cursor = 0
+    actual_cursor = 0
+    intended_points = [0]
+    actual_points = [0]
+    sign_mismatch = 0
+    for intended, actual in zip(intended_intervals, actual_intervals):
+        intended = max(-12, min(12, int(intended)))
+        actual = max(-12, min(12, int(actual)))
+        intended_cursor += intended
+        actual_cursor += actual
+        intended_points.append(intended_cursor)
+        actual_points.append(actual_cursor)
+        if intended and actual and (intended > 0) != (actual > 0):
+            sign_mismatch += 1
+
+    intended_range = max(intended_points) - min(intended_points)
+    actual_range = max(actual_points) - min(actual_points)
+    range_loss = max(0, intended_range - actual_range)
+    endpoint_loss = abs(intended_points[-1] - actual_points[-1]) * 0.8
+    return 6.0 * range_loss + 6.0 * sign_mismatch + endpoint_loss
 
 
 def _melodic_continuity_cost(previous: int, current: int) -> float:
@@ -727,11 +886,6 @@ def _sonority_spacing_cost(
             if other_index > voice_index and proposed_pitch <= other + 1:
                 cost += 90
     return cost
-
-
-def _windows(values: list[int], size: int):
-    for index in range(0, len(values) - size + 1):
-        yield values[index : index + size]
 
 
 def _nearest_scale_degree_pitch(

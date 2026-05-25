@@ -19,7 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and verify fugue quality gates.")
     parser.add_argument("--subject", type=Path, default=DEFAULT_SUBJECT)
     parser.add_argument("--out-dir", type=Path, default=Path("out/verification"))
-    parser.add_argument("--variants", type=int, default=8)
+    parser.add_argument("--variants", type=int, default=16)
     args = parser.parse_args()
 
     root = Path.cwd()
@@ -44,6 +44,7 @@ def main() -> int:
             "parsed_parts": len(parsed.parts),
             "parsed_duration": float(parsed.highestTime),
             "diversity": diversity,
+            "audibility": _audibility_observations(best),
             "best": best.diagnostics.to_dict(),
             "candidate_scores": [candidate.diagnostics.score for candidate in candidates],
         }
@@ -83,6 +84,10 @@ def _quality_failures(
         failures.append(f"{request.voices}-voice fugue has sub-half-beat notes")
     if diag.melody_issues != 0:
         failures.append(f"{request.voices}-voice fugue has weak voice-line melody metrics")
+    if diag.free_stagnation_issues != 0:
+        failures.append(f"{request.voices}-voice fugue has static free-counterpoint spans")
+    if diag.free_rhythm_issues != 0:
+        failures.append(f"{request.voices}-voice fugue has unstable free-counterpoint rhythm")
     if diag.vertical_clusters != 0:
         failures.append(f"{request.voices}-voice fugue has vertical tone clusters")
     if request.voices == 3 and diag.voice_crossings != 0:
@@ -115,6 +120,112 @@ def _top_voice_contour(candidate: GeneratedFugue) -> tuple[int, ...]:
         if event.pitch is not None
     ]
     return tuple(event.pitch for event in events[:16])
+
+
+def _audibility_observations(fugue: GeneratedFugue) -> dict[str, object]:
+    per_voice = []
+    for index, voice in enumerate(fugue.voices):
+        events = sorted([event for event in voice.events if event.pitch is not None], key=lambda item: item.offset)
+        free = [event for event in events if event.label == "free counterpoint"]
+        durations = _histogram(event.duration for event in free)
+        max_run_notes, max_run_beats = _max_repeated_run(free)
+        pitches = [event.pitch for event in events]
+        per_voice.append(
+            {
+                "voice": index,
+                "notes": len(events),
+                "free_notes": len(free),
+                "unique_pitches": len(set(pitches)),
+                "pitch_span": 0 if not pitches else max(pitches) - min(pitches),
+                "free_duration_histogram": durations,
+                "max_free_repeated_run_notes": max_run_notes,
+                "max_free_repeated_run_beats": round(max_run_beats, 3),
+            }
+        )
+
+    vertical_samples = _vertical_samples(fugue)
+    return {
+        "per_voice": per_voice,
+        "vertical": vertical_samples,
+        "summary": {
+            "max_free_repeated_run_notes": max(item["max_free_repeated_run_notes"] for item in per_voice),
+            "max_free_repeated_run_beats": max(item["max_free_repeated_run_beats"] for item in per_voice),
+            "minimum_unique_pitches": min(item["unique_pitches"] for item in per_voice),
+            "average_active_voices": vertical_samples["average_active_voices"],
+            "strong_dissonance_rate": vertical_samples["strong_dissonance_rate"],
+            "vertical_cluster_times": fugue.diagnostics.vertical_clusters,
+        },
+    }
+
+
+def _vertical_samples(fugue: GeneratedFugue) -> dict[str, object]:
+    total_duration = fugue.diagnostics.total_duration
+    times = [round(i * 0.5, 6) for i in range(int(total_duration / 0.5) + 1)]
+    active_counts = []
+    strong_checks = 0
+    strong_dissonances = 0
+    close_low_spacing = 0
+    full_texture_after_exposition = 0
+    after_exposition_checks = 0
+    exposition_end = max((entry.start for entry in fugue.entries[: len(fugue.voices)]), default=0.0)
+    for t in times:
+        pitches = [voice.active_pitch(t) for voice in fugue.voices]
+        active = [pitch for pitch in pitches if pitch is not None]
+        active_counts.append(len(active))
+        if t >= exposition_end:
+            after_exposition_checks += 1
+            if len(active) >= len(fugue.voices) - 1:
+                full_texture_after_exposition += 1
+        if abs(t % 1.0) < 1e-6:
+            for i in range(len(pitches)):
+                for j in range(i + 1, len(pitches)):
+                    if pitches[i] is None or pitches[j] is None:
+                        continue
+                    strong_checks += 1
+                    if abs(pitches[i] - pitches[j]) % 12 in {1, 2, 6, 10, 11}:
+                        strong_dissonances += 1
+        ordered = sorted(active)
+        if len(ordered) >= 2 and ordered[1] - ordered[0] < 5:
+            close_low_spacing += 1
+    return {
+        "average_active_voices": round(sum(active_counts) / max(1, len(active_counts)), 3),
+        "minimum_active_voices": min(active_counts) if active_counts else 0,
+        "full_texture_ratio_after_exposition": round(
+            full_texture_after_exposition / max(1, after_exposition_checks),
+            3,
+        ),
+        "strong_dissonance_rate": round(strong_dissonances / max(1, strong_checks), 3),
+        "close_low_spacing_samples": close_low_spacing,
+    }
+
+
+def _max_repeated_run(events) -> tuple[int, float]:
+    run_pitch = None
+    run_count = 0
+    run_duration = 0.0
+    best_count = 0
+    best_duration = 0.0
+    for event in events:
+        if event.pitch == run_pitch:
+            run_count += 1
+            run_duration += event.duration
+        else:
+            best_count = max(best_count, run_count)
+            best_duration = max(best_duration, run_duration)
+            run_pitch = event.pitch
+            run_count = 1
+            run_duration = event.duration
+    best_count = max(best_count, run_count)
+    best_duration = max(best_duration, run_duration)
+    return best_count, best_duration
+
+
+def _histogram(values) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = str(round(float(value), 3))
+        counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: float(item[0])))
 
 
 if __name__ == "__main__":

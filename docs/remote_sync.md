@@ -2,17 +2,21 @@
 
 Updated: 2026-05-25.
 
-The local `main` branch and GitHub `origin/main` are synchronized. This note records
-the recovery steps for the ownership/authentication issue that appeared while publishing
-the implementation work.
+The local implementation branch is complete and one commit ahead of GitHub `origin/main`.
+This note records the current push state and the recovery steps for the
+ownership/authentication/network issues that appeared while publishing the implementation
+work.
 
 ## Current State
 
-- Remote: `https://github.com/Loong-C/Fugue.git`
+- Remote: `git@github.com:Loong-C/Fugue.git`
 - Local branch: `main`
 - Remote branch: `origin/main`
-- Local status at the time of writing: `main` and `origin/main` both point to the
-  implementation branch tip.
+- Local implementation commit: current local `HEAD` with learned free-counterpoint
+  decoding.
+- Local status at the time of writing: `main` is ahead of `origin/main` by one commit.
+- GitHub `main` has not yet received `c5a9b36`; the Codex sandbox cannot connect to
+  `github.com:22` or `ssh.github.com:443`.
 - The generated corpora, style cache, and MIDI verification outputs are intentionally
   ignored by git through `.gitignore`.
 
@@ -24,6 +28,14 @@ For future pushes from a shell that sees the repository as a different owner, us
 git -c safe.directory=F:/Personal/Code/Fugue push origin main
 ```
 
+If SSH port 22 is blocked, try GitHub's SSH-over-443 endpoint from the user's
+interactive PowerShell:
+
+```powershell
+$env:GIT_SSH_COMMAND='ssh -o HostName=ssh.github.com -o Port=443 -o User=git -o StrictHostKeyChecking=accept-new'
+git -c safe.directory=F:/Personal/Code/Fugue push origin main
+```
+
 If Git reports dubious ownership again, keep the `safe.directory` option above or add
 the repository once to the user's global Git config:
 
@@ -31,10 +43,10 @@ the repository once to the user's global Git config:
 git config --global --add safe.directory F:/Personal/Code/Fugue
 ```
 
-## Authentication Blocker Resolved
+## Authentication and Network Notes
 
-The earlier push failure was caused by local authentication and ownership checks, not
-by repository content:
+The earlier push failures were caused by local authentication, ownership checks, and
+network access, not by repository content:
 
 - The Codex sandbox process could not access the user's GitHub keyring token.
 - Plain `git push origin main` reaches GitHub, receives a 401 challenge, then waits for
@@ -48,6 +60,9 @@ by repository content:
 - The user's interactive PowerShell session did have a valid `gh` login; pushing with
   `git -c safe.directory=F:/Personal/Code/Fugue push origin main` resolved the remote
   sync once the dubious ownership check was bypassed.
+- The later SSH remote avoids `git-remote-https.exe`, but the Codex sandbox process is
+  blocked from opening GitHub SSH sockets. The user's own PowerShell session is the
+  expected place to run the final push.
 
 ## Recovery Options
 

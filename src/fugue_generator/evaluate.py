@@ -23,6 +23,8 @@ def evaluate_voice_lines(
     rhythmic_grid_violations = 0
     short_note_count = 0
     melody_issues = 0
+    free_stagnation_issues = 0
+    free_rhythm_issues = 0
     vertical_clusters = 0
 
     for voice in voices:
@@ -39,6 +41,9 @@ def evaluate_voice_lines(
             if first.end > second.offset + 1e-6:
                 monophonic_overlaps += 1
         melody_issues += _voice_melody_issues(note_events)
+        stagnation, rhythm = _free_counterpoint_issues(note_events)
+        free_stagnation_issues += stagnation
+        free_rhythm_issues += rhythm
 
     cluster_times = [round(i * 0.25, 6) for i in range(int(total_duration / 0.25) + 1)]
     for t in cluster_times:
@@ -87,6 +92,8 @@ def evaluate_voice_lines(
         - 60.0 * rhythmic_grid_violations
         - 25.0 * short_note_count
         - 35.0 * melody_issues
+        - 45.0 * free_stagnation_issues
+        - 30.0 * free_rhythm_issues
         - 80.0 * vertical_clusters
         + 20.0 * len(entries)
     )
@@ -102,6 +109,8 @@ def evaluate_voice_lines(
         rhythmic_grid_violations=rhythmic_grid_violations,
         short_note_count=short_note_count,
         melody_issues=melody_issues,
+        free_stagnation_issues=free_stagnation_issues,
+        free_rhythm_issues=free_rhythm_issues,
         vertical_clusters=vertical_clusters,
         total_duration=total_duration,
         seed=seed,
@@ -135,6 +144,38 @@ def _voice_melody_issues(events) -> int:
         if abs(current - previous) > 12:
             issues += 1
     return issues
+
+
+def _free_counterpoint_issues(events) -> tuple[int, int]:
+    free_events = [event for event in events if event.label == "free counterpoint"]
+    if not free_events:
+        return 0, 0
+    stagnation = 0
+    rhythm = 0
+    run_pitch = None
+    run_duration = 0.0
+    run_count = 0
+    stable_long_values = {3.0, 4.0}
+    for event in free_events:
+        if event.pitch == run_pitch:
+            run_count += 1
+            run_duration += event.duration
+        else:
+            if run_count >= 4 or run_duration >= 4.0 - 1e-6:
+                stagnation += 1
+            run_pitch = event.pitch
+            run_count = 1
+            run_duration = event.duration
+
+        if event.duration > 4.0 + 1e-6:
+            stagnation += 1
+        if event.duration > 2.0 + 1e-6 and round(event.duration, 6) not in stable_long_values:
+            rhythm += 1
+        if event.duration > 2.0 + 1e-6 and not _is_on_grid(event.offset, 1.0):
+            rhythm += 1
+    if run_count >= 4 or run_duration >= 4.0 - 1e-6:
+        stagnation += 1
+    return stagnation, rhythm
 
 
 def _has_vertical_cluster(pitches: list[int]) -> bool:

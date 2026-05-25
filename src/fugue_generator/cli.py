@@ -39,7 +39,7 @@ def generate(
     ),
     seed: int = typer.Option(1, help="Random seed. Change it for different versions."),
     temperature: float = typer.Option(1.0, min=0.2, max=3.0, help="Sampling temperature."),
-    variants: int = typer.Option(5, min=1, max=32, help="Generate and score this many candidates."),
+    variants: int = typer.Option(16, min=1, max=32, help="Generate and score this many candidates."),
     measures: int | None = typer.Option(None, min=20, max=80, help="Optional total length in 4/4 measures."),
 ) -> None:
     """Generate a complete short fugue and write MIDI."""
@@ -87,13 +87,14 @@ def generate(
     typer.echo(f"Wrote {output}")
     typer.echo(
         "score={score:.1f} entries={entries} parallel5={p5} parallel8={p8} "
-        "crossings={crossings} strong_dissonances={diss}".format(
+        "crossings={crossings} strong_dissonances={diss} free_stagnation={stagnation}".format(
             score=fugue.diagnostics.score,
             entries=len(fugue.entries),
             p5=fugue.diagnostics.parallel_fifths,
             p8=fugue.diagnostics.parallel_octaves,
             crossings=fugue.diagnostics.voice_crossings,
             diss=fugue.diagnostics.strong_dissonances,
+            stagnation=fugue.diagnostics.free_stagnation_issues,
         )
     )
 
