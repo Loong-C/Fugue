@@ -2,21 +2,19 @@
 
 Updated: 2026-05-25.
 
-The local implementation branch is complete and one commit ahead of GitHub `origin/main`.
-This note records the current push state and the recovery steps for the
-ownership/authentication/network issues that appeared while publishing the implementation
-work.
+The local `main` branch and GitHub `origin/main` are synchronized. This note records
+the current push state and the recovery steps for the ownership/authentication/network
+issues that appeared while publishing the implementation work.
 
 ## Current State
 
 - Remote: `git@github.com:Loong-C/Fugue.git`
 - Local branch: `main`
 - Remote branch: `origin/main`
-- Local implementation commit: current local `HEAD` with learned free-counterpoint
-  decoding.
-- Local status at the time of writing: `main` is ahead of `origin/main` by one commit.
-- GitHub `main` has not yet received `c5a9b36`; the Codex sandbox cannot connect to
-  `github.com:22` or `ssh.github.com:443`.
+- Synchronized implementation commit:
+  `5be36c3 Improve learned free counterpoint decoding`
+- GitHub `main` contains the learned free-counterpoint decoding work and updated
+  audibility verification.
 - The generated corpora, style cache, and MIDI verification outputs are intentionally
   ignored by git through `.gitignore`.
 
@@ -60,8 +58,8 @@ network access, not by repository content:
 - The user's interactive PowerShell session did have a valid `gh` login; pushing with
   `git -c safe.directory=F:/Personal/Code/Fugue push origin main` resolved the remote
   sync once the dubious ownership check was bypassed.
-- The later SSH remote avoids `git-remote-https.exe`, but the Codex sandbox process is
-  blocked from opening GitHub SSH sockets. The user's own PowerShell session is the
+- The later SSH remote avoids `git-remote-https.exe`. If the Codex sandbox process is
+  blocked from opening GitHub SSH sockets, the user's own PowerShell session remains the
   expected place to run the final push.
 
 ## Recovery Options
