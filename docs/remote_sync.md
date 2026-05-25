@@ -2,21 +2,23 @@
 
 Updated: 2026-05-25.
 
-The local `main` branch contains the implementation and verification work, but the
-GitHub remote can only be updated after local GitHub credentials are available.
+The local `main` branch and GitHub `origin/main` are synchronized. This note records
+the recovery steps for the ownership/authentication issue that appeared while publishing
+the implementation work.
 
 ## Current State
 
 - Remote: `https://github.com/Loong-C/Fugue.git`
 - Local branch: `main`
 - Remote branch: `origin/main`
-- Local status at the time of writing: `main` is ahead of `origin/main`.
+- Local status at the time of writing: `main` and `origin/main` both point to the
+  implementation branch tip.
 - The generated corpora, style cache, and MIDI verification outputs are intentionally
   ignored by git through `.gitignore`.
 
-## Push Command
+## Future Push Command
 
-After GitHub authentication is restored, run:
+For future pushes from a shell that sees the repository as a different owner, use:
 
 ```powershell
 git -c safe.directory=F:/Personal/Code/Fugue push origin main
@@ -29,12 +31,12 @@ the repository once to the user's global Git config:
 git config --global --add safe.directory F:/Personal/Code/Fugue
 ```
 
-## Authentication Blocker Observed
+## Authentication Blocker Resolved
 
-The normal push path is blocked by local authentication, not by repository content:
+The earlier push failure was caused by local authentication and ownership checks, not
+by repository content:
 
-- `gh` is not installed on this machine.
-- `git credential-manager github list` returns no GitHub accounts.
+- The Codex sandbox process could not access the user's GitHub keyring token.
 - Plain `git push origin main` reaches GitHub, receives a 401 challenge, then waits for
   Git Credential Manager.
 - `GIT_TERMINAL_PROMPT=0` with credential helpers disabled fails with
@@ -43,10 +45,13 @@ The normal push path is blocked by local authentication, not by repository conte
   Credential Manager's .NET HTTP stack does not support the `socks5` proxy scheme.
 - Device login with the proxy disabled reaches the local network policy and cannot open
   a direct socket to GitHub.
+- The user's interactive PowerShell session did have a valid `gh` login; pushing with
+  `git -c safe.directory=F:/Personal/Code/Fugue push origin main` resolved the remote
+  sync once the dubious ownership check was bypassed.
 
 ## Recovery Options
 
-Use one of these paths, then run the push command above:
+Use one of these paths if a future checkout hits the same issue:
 
 1. Install GitHub CLI and authenticate:
 
