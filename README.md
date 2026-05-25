@@ -17,7 +17,7 @@ Current state:
   corpus-trained Markov style profile and then rule-scored. The profile is trained from
   JSB chorales plus the downloaded WTC fugue voice data when available.
 
-Planned CLI shape:
+CLI usage:
 
 ```powershell
 .\.venv\Scripts\fugue generate `
@@ -27,7 +27,7 @@ Planned CLI shape:
   --subject examples\subjects\c_minor_subject.theme `
   --out out\fugue.mid `
   --report out\fugue_report.json `
-  --variants 8 `
+  --variants 16 `
   --temperature 0.85
 ```
 
@@ -51,10 +51,12 @@ Useful commands:
 ```powershell
 .\.venv\Scripts\fugue inspect-subject examples\subjects\c_minor_subject.theme
 .\.venv\Scripts\fugue build-style-profile
-.\.venv\Scripts\python scripts\verify_generator.py --variants 8
+.\.venv\Scripts\python scripts\verify_generator.py --variants 16
 .\.venv\Scripts\pytest
 ```
 
 The verifier writes MIDI examples and a JSON quality report under `out/verification/`.
 It checks parseability, entry count, zero parallel fifths/octaves in the selected best
-candidates, range safety, and candidate diversity.
+candidates, range safety, monophonic voice lines, stable rhythmic grid placement,
+sub-half-beat notes, weak melodic-line metrics, vertical tone clusters, and candidate
+diversity.
