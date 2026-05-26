@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-STYLE_PROFILE_VERSION = 8
+STYLE_PROFILE_VERSION = 9
 RHYTHM_CLASSES = ("plain", "sixteenth", "dotted", "syncopated", "long")
 
 DEFAULT_INTERVAL_WEIGHTS = {
@@ -448,6 +448,7 @@ def _update_melodic_counters(
     duration_phase_counter: dict[float, Counter[float]],
     cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]],
 ) -> None:
+    note_runs = _merge_contiguous_repeated_runs(note_runs)
     if not note_runs:
         return
     pitches = [pitch for _, pitch, _ in note_runs]
@@ -469,6 +470,27 @@ def _update_melodic_counters(
     for previous_interval, interval in zip(intervals, intervals[1:]):
         interval_transition_counter.setdefault(previous_interval, Counter())[interval] += 1
     _update_cell_counter(note_runs, cell_counter)
+
+
+def _merge_contiguous_repeated_runs(
+    note_runs: list[tuple[float, int, float]],
+) -> list[tuple[float, int, float]]:
+    merged: list[tuple[float, int, float]] = []
+    for offset, pitch, duration in sorted(note_runs):
+        if (
+            merged
+            and pitch == merged[-1][1]
+            and abs((merged[-1][0] + merged[-1][2]) - offset) < 1e-6
+        ):
+            previous_offset, previous_pitch, previous_duration = merged[-1]
+            merged[-1] = (
+                previous_offset,
+                previous_pitch,
+                round(previous_duration + duration, 6),
+            )
+        else:
+            merged.append((offset, pitch, duration))
+    return merged
 
 
 def _counter_map_to_dict(counter_map: dict[int | float, Counter[int | float]]) -> dict:

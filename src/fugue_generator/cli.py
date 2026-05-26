@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 import typer
 
 from .evaluate import with_output_path
 from .export import write_midi, write_musicxml
-from .generator import FugueGenerator, FugueRequest
+from .generator import FugueGenerator, FugueRequest, selection_key
 from .style import CorpusStyleModel
 from .subject import load_subject, subject_summary
 from .theory import KeyContext
@@ -31,16 +32,16 @@ def generate(
     voices: int = typer.Option(4, min=3, max=4, help="Number of voices."),
     subject: str = typer.Option(..., help="Path to a MIDI, MusicXML, or .theme subject file."),
     out: str = typer.Option("out/fugue.mid", help="Output MIDI path."),
-    report: str | None = typer.Option(None, help="Optional JSON diagnostics path."),
-    musicxml: str | None = typer.Option(None, help="Optional MusicXML output path."),
-    write_variants_dir: str | None = typer.Option(
+    report: Optional[str] = typer.Option(None, help="Optional JSON diagnostics path."),
+    musicxml: Optional[str] = typer.Option(None, help="Optional MusicXML output path."),
+    write_variants_dir: Optional[str] = typer.Option(
         None,
         help="Optional directory to write every generated candidate MIDI.",
     ),
     seed: int = typer.Option(1, help="Random seed. Change it for different versions."),
     temperature: float = typer.Option(1.0, min=0.2, max=3.0, help="Sampling temperature."),
     variants: int = typer.Option(16, min=1, max=32, help="Generate and score this many candidates."),
-    measures: int | None = typer.Option(None, min=20, max=80, help="Optional total length in 4/4 measures."),
+    measures: Optional[int] = typer.Option(None, min=20, max=80, help="Optional total length in 4/4 measures."),
 ) -> None:
     """Generate a complete short fugue and write MIDI."""
     root = Path.cwd()
@@ -56,7 +57,7 @@ def generate(
     )
     generator = FugueGenerator(root)
     candidates = generator.generate_candidates(request)
-    fugue = max(candidates, key=lambda candidate: candidate.diagnostics.score)
+    fugue = max(candidates, key=selection_key)
     output = write_midi(fugue, out, KeyContext(key, mode))
     fugue.diagnostics = with_output_path(fugue.diagnostics, output)
 
@@ -65,7 +66,7 @@ def generate(
         variants_dir.mkdir(parents=True, exist_ok=True)
         ranked_candidates = sorted(
             candidates,
-            key=lambda item: item.diagnostics.score,
+            key=selection_key,
             reverse=True,
         )
         for index, candidate in enumerate(ranked_candidates, 1):
@@ -77,7 +78,7 @@ def generate(
     if report:
         Path(report).parent.mkdir(parents=True, exist_ok=True)
         report_data = fugue.diagnostics.to_dict()
-        ranked_candidates = sorted(candidates, key=lambda item: item.diagnostics.score, reverse=True)
+        ranked_candidates = sorted(candidates, key=selection_key, reverse=True)
         report_data["candidates"] = [candidate.diagnostics.to_dict() for candidate in ranked_candidates]
         Path(report).write_text(
             json.dumps(report_data, indent=2, ensure_ascii=False),

@@ -32,6 +32,26 @@ class FugueRequest:
     measures: int | None = None
 
 
+def selection_key(candidate: GeneratedFugue) -> tuple[int, float]:
+    diagnostics = candidate.diagnostics
+    hard_issues = (
+        diagnostics.parallel_fifths
+        + diagnostics.parallel_octaves
+        + diagnostics.range_violations
+        + diagnostics.monophonic_overlaps
+        + diagnostics.rhythmic_grid_violations
+        + diagnostics.short_note_count
+        + diagnostics.melody_issues
+        + diagnostics.repeated_attack_issues
+        + diagnostics.free_stagnation_issues
+        + diagnostics.free_rhythm_issues
+        + diagnostics.vertical_clusters
+    )
+    if len(candidate.voices) == 3:
+        hard_issues += diagnostics.voice_crossings
+    return (-hard_issues, diagnostics.score)
+
+
 class FugueGenerator:
     def __init__(self, project_root: Path, style_model: CorpusStyleModel | None = None) -> None:
         self.project_root = project_root
@@ -39,7 +59,7 @@ class FugueGenerator:
 
     def generate(self, request: FugueRequest) -> GeneratedFugue:
         candidates = self.generate_candidates(request)
-        return max(candidates, key=lambda candidate: candidate.diagnostics.score)
+        return max(candidates, key=selection_key)
 
     def generate_candidates(self, request: FugueRequest) -> list[GeneratedFugue]:
         return [
@@ -85,7 +105,10 @@ class FugueGenerator:
 
         self._place_countersubjects(lines, entries, countersubject, key_context, specs)
         self._place_cadence(lines, key_context, total_duration)
+        harmony = self._infer_harmony_from_fixed_lines(lines, harmony, total_duration)
         self._fill_all_gaps(lines, harmony, subject, request.temperature, rng, total_duration)
+        _merge_sustained_free_repetitions(lines)
+        self._polish_vertical_sonorities(lines, harmony)
         _merge_sustained_free_repetitions(lines)
 
         diagnostics = evaluate_voice_lines(
@@ -94,6 +117,7 @@ class FugueGenerator:
             total_duration,
             seed,
             self.style_model.source,
+            harmony=harmony,
         )
         return GeneratedFugue(lines, entries, harmony, diagnostics)
 
@@ -201,6 +225,49 @@ class FugueGenerator:
             HarmonySection(total_duration - 8.0, total_duration, key_context.name, (2, 5, 1, 1), "cadence"),
         ]
         return entries, harmony
+
+    def _infer_harmony_from_fixed_lines(
+        self,
+        lines: list[VoiceLine],
+        base_harmony: list[HarmonySection],
+        total_duration: float,
+    ) -> list[HarmonySection]:
+        inferred: list[HarmonySection] = []
+        previous_degree: int | None = None
+        measure_count = int(math.ceil(total_duration / 4.0))
+        for measure in range(measure_count):
+            start = float(measure * 4)
+            end = min(total_duration, start + 4.0)
+            base_section = _section_at(base_harmony, start)
+            key_context = _parse_key_name(base_section.key_name)
+            broad_degree = base_section.progression[
+                int(((start - base_section.start) // 4) % len(base_section.progression))
+            ]
+            candidates = _candidate_harmony_degrees(broad_degree, base_section.label)
+            degree = min(
+                candidates,
+                key=lambda candidate: _harmony_fit_cost(
+                    lines,
+                    key_context,
+                    candidate,
+                    start,
+                    end,
+                    broad_degree,
+                    base_section.label,
+                    previous_degree,
+                ),
+            )
+            inferred.append(
+                HarmonySection(
+                    start,
+                    end,
+                    key_context.name,
+                    (degree,),
+                    f"inferred {base_section.label}",
+                )
+            )
+            previous_degree = degree
+        return inferred
 
     def _make_countersubject(
         self,
@@ -368,7 +435,7 @@ class FugueGenerator:
                 rng,
                 end_next,
             )
-            score = self._segment_penalty(lines, voice_index, candidate, start_previous, end_next)
+            score = self._segment_penalty(lines, voice_index, candidate, start_previous, end_next, harmony)
             score += 1.05 * self._style_penalty(candidate)
             if score < best_score:
                 best = candidate
@@ -457,6 +524,7 @@ class FugueGenerator:
                     lines,
                     voice_index,
                     candidate,
+                    harmony,
                     previous,
                     previous_interval,
                     previous_duration,
@@ -488,7 +556,7 @@ class FugueGenerator:
         subject_intervals: list[int],
         rng: random.Random,
     ) -> list[MusicalEvent]:
-        planned: list[tuple[float, float, int, int, list[int], bool, KeyContext]] = []
+        planned: list[tuple[float, float, int, int, list[int], set[int], int, bool, KeyContext]] = []
         t = start
         pitch_cursor = previous
         for raw_duration, raw_interval in zip(durations, intervals):
@@ -509,13 +577,27 @@ class FugueGenerator:
                 pitch = _fold_into_range(pitch, spec.low, spec.high)
             section = _section_at(harmony, t)
             chord_degree = section.progression[int(((t - section.start) // 4) % len(section.progression))]
+            root_pc = key_context.pitch_from_diatonic_index(chord_degree - 1) % 12
             chord = key_context.chord_pitches(
                 chord_degree,
                 spec.low,
                 spec.high,
-                include_seventh=chord_degree == 5,
+                include_seventh=False,
             )
-            planned.append((t, duration, pitch, interval, chord, abs(t % 1.0) < 1e-6, key_context))
+            chord_pcs = {chord_pitch % 12 for chord_pitch in chord}
+            planned.append(
+                (
+                    t,
+                    duration,
+                    pitch,
+                    interval,
+                    chord,
+                    chord_pcs,
+                    root_pc,
+                    abs(t % 1.0) < 1e-6,
+                    key_context,
+                )
+            )
             pitch_cursor = pitch
             t = round(t + duration, 6)
         if not planned:
@@ -535,7 +617,7 @@ class FugueGenerator:
         self,
         lines: list[VoiceLine],
         voice_index: int,
-        planned: list[tuple[float, float, int, int, list[int], bool, KeyContext]],
+        planned: list[tuple[float, float, int, int, list[int], set[int], int, bool, KeyContext]],
         low: int,
         high: int,
         previous: int,
@@ -545,10 +627,18 @@ class FugueGenerator:
         states: list[tuple[float, list[int], int, int | None, float | None]] = [
             (0.0, [], previous, previous_interval, previous_duration)
         ]
-        for t, duration, proposed, intended_interval, chord, strong, key_context in planned:
+        for t, duration, proposed, intended_interval, chord, chord_pcs, root_pc, strong, key_context in planned:
             next_states: list[tuple[float, list[int], int, int | None, float | None]] = []
             for cost, path, prev_pitch, prev_interval, prev_duration in states:
-                for pitch in _cell_pitch_candidates(proposed, chord, key_context, low, high):
+                for pitch in _cell_pitch_candidates(
+                    proposed,
+                    chord,
+                    key_context,
+                    low,
+                    high,
+                    prev_pitch,
+                    intended_interval,
+                ):
                     interval = max(-12, min(12, int(pitch - prev_pitch)))
                     pitch_cost = cost
                     pitch_cost += 0.5 * _melodic_continuity_cost(prev_pitch, pitch)
@@ -558,6 +648,14 @@ class FugueGenerator:
                     pitch_cost += 0.6 * self.style_model.duration_penalty(duration, prev_duration, phase=t)
                     if strong and chord:
                         pitch_cost += 0 if pitch in chord else 2.5
+                    pitch_cost += _target_harmony_pitch_cost(
+                        pitch,
+                        chord_pcs,
+                        root_pc,
+                        strong,
+                        voice_index,
+                        len(lines),
+                    )
                     pitch_cost += self._vertical_pitch_penalty(
                         lines,
                         voice_index,
@@ -569,14 +667,14 @@ class FugueGenerator:
                     next_states.append((pitch_cost, path + [pitch], pitch, interval, duration))
             next_states.sort(key=lambda item: item[0])
             states = next_states[:4]
-        intended_intervals = [interval for _, _, _, interval, _, _, _ in planned]
+        intended_intervals = [interval for _, _, _, interval, _, _, _, _, _ in planned]
         best_path = min(
             states,
             key=lambda item: item[0] + _cell_contour_loss(previous, item[1], intended_intervals),
         )[1]
         return [
             MusicalEvent(t, duration, pitch, "free counterpoint")
-            for (t, duration, _, _, _, _, _), pitch in zip(planned, best_path)
+            for (t, duration, _, _, _, _, _, _, _), pitch in zip(planned, best_path)
         ]
 
     def _vertical_pitch_penalty(
@@ -629,6 +727,7 @@ class FugueGenerator:
         lines: list[VoiceLine],
         voice_index: int,
         candidate: list[MusicalEvent],
+        harmony: list[HarmonySection],
         previous: int | None,
         previous_interval: int | None,
         previous_duration: float | None,
@@ -657,6 +756,7 @@ class FugueGenerator:
                 event.pitch,
                 local_previous,
             )
+            penalty += self._event_harmony_penalty(lines, voice_index, event, harmony)
             local_previous = event.pitch
             local_previous_interval = interval
             local_previous_duration = event.duration
@@ -672,6 +772,7 @@ class FugueGenerator:
         segment: list[MusicalEvent],
         start_previous: int | None = None,
         end_next: int | None = None,
+        harmony: list[HarmonySection] | None = None,
     ) -> float:
         penalty = 0.0
         previous = start_previous
@@ -704,6 +805,8 @@ class FugueGenerator:
                             self_previous = previous if check_t - 0.5 < event.offset - 1e-6 else event.pitch
                             if _is_parallel_perfect_motion(self_previous, event.pitch, other_previous, other):
                                 penalty += 200
+            if harmony is not None:
+                penalty += self._event_harmony_penalty(lines, voice_index, event, harmony)
             previous = event.pitch
         if previous is not None and end_next is not None and segment:
             penalty += _melodic_continuity_cost(previous, end_next)
@@ -716,6 +819,149 @@ class FugueGenerator:
         if len(pitches) < 2:
             return 0.0
         return self.style_model.style_penalty(pitches, durations)
+
+    def _event_harmony_penalty(
+        self,
+        lines: list[VoiceLine],
+        voice_index: int,
+        event: MusicalEvent,
+        harmony: list[HarmonySection],
+    ) -> float:
+        if event.pitch is None:
+            return 0.0
+        check_times = set(_covered_strong_times(event.offset, event.duration))
+        if not check_times:
+            check_times.add(event.offset)
+        penalty = 0.0
+        for check_t in sorted(check_times):
+            chord_pcs, root_pc = _target_chord_context(harmony, check_t)
+            active_by_voice = [line.active_pitch(check_t) for line in lines]
+            active_by_voice[voice_index] = event.pitch
+            penalty += _harmonic_sonority_cost(
+                active_by_voice,
+                chord_pcs,
+                root_pc,
+                voice_index,
+                _is_strong_metric_time(check_t),
+            )
+        return penalty
+
+    def _polish_vertical_sonorities(
+        self,
+        lines: list[VoiceLine],
+        harmony: list[HarmonySection],
+        passes: int = 2,
+    ) -> None:
+        for _ in range(passes):
+            changed = False
+            for voice_index, line in enumerate(lines):
+                for event_index, event in enumerate(list(line.events)):
+                    if event.pitch is None or event.label != "free counterpoint":
+                        continue
+                    check_times = _covered_strong_times(event.offset, event.duration)
+                    has_repeated_neighbor = _has_rapid_repeated_neighbor(line.events, event_index)
+                    if not check_times and not has_repeated_neighbor:
+                        continue
+                    current_cost = self._polish_event_cost(
+                        lines,
+                        voice_index,
+                        event_index,
+                        event.pitch,
+                        harmony,
+                    )
+                    best_pitch = event.pitch
+                    best_cost = current_cost
+                    for pitch in _polish_pitch_candidates(event, line.spec, harmony):
+                        if pitch == event.pitch:
+                            continue
+                        candidate_cost = self._polish_event_cost(
+                            lines,
+                            voice_index,
+                            event_index,
+                            pitch,
+                            harmony,
+                        )
+                        if candidate_cost < best_cost - 6.0:
+                            best_pitch = pitch
+                            best_cost = candidate_cost
+                    if best_pitch != event.pitch:
+                        line.events[event_index] = MusicalEvent(
+                            event.offset,
+                            event.duration,
+                            best_pitch,
+                            event.label,
+                        )
+                        line.events.sort(key=lambda item: (item.offset, item.duration))
+                        changed = True
+            if not changed:
+                break
+
+    def _polish_event_cost(
+        self,
+        lines: list[VoiceLine],
+        voice_index: int,
+        event_index: int,
+        pitch: int,
+        harmony: list[HarmonySection],
+    ) -> float:
+        line = lines[voice_index]
+        event = line.events[event_index]
+        previous_pitch = _previous_event_pitch(line.events, event_index)
+        next_pitch = _next_event_pitch(line.events, event_index)
+        cost = 0.0
+        if previous_pitch is not None:
+            interval = int(pitch - previous_pitch)
+            cost += 0.8 * _melodic_continuity_cost(previous_pitch, pitch)
+            cost += 1.2 * self.style_model.interval_penalty(interval)
+            if (
+                previous_pitch == pitch
+                and event.duration <= 0.5 + 1e-6
+            ):
+                cost += 90.0
+        if next_pitch is not None:
+            cost += 0.8 * _melodic_continuity_cost(pitch, next_pitch)
+            if next_pitch == pitch and event.duration <= 0.5 + 1e-6:
+                cost += 90.0
+
+        for check_t in _covered_strong_times(event.offset, event.duration):
+            chord_pcs, root_pc = _target_chord_context(harmony, check_t)
+            active_by_voice = [voice.active_pitch(check_t) for voice in lines]
+            active_by_voice[voice_index] = pitch
+            for other_index, other in enumerate(active_by_voice):
+                if other_index == voice_index or other is None:
+                    continue
+                interval_class = abs(pitch - other) % 12
+                if interval_class in {1, 2, 6, 10, 11}:
+                    cost += 60.0
+                if interval_class == 0:
+                    cost += 35.0
+                if previous_pitch is not None:
+                    other_previous = lines[other_index].active_pitch(max(0.0, check_t - 0.5))
+                    if other_previous is not None and _is_parallel_perfect_motion(
+                        previous_pitch,
+                        pitch,
+                        other_previous,
+                        other,
+                    ):
+                        cost += 1500.0
+                if next_pitch is not None:
+                    other_next = lines[other_index].active_pitch(check_t + 0.5)
+                    if other_next is not None and _is_parallel_perfect_motion(
+                        pitch,
+                        next_pitch,
+                        other,
+                        other_next,
+                    ):
+                        cost += 1500.0
+            cost += 1.4 * _sonority_spacing_cost(active_by_voice, voice_index)
+            cost += 2.2 * _harmonic_sonority_cost(
+                active_by_voice,
+                chord_pcs,
+                root_pc,
+                voice_index,
+                True,
+            )
+        return cost
 
     def _next_boundary_penalty(
         self,
@@ -788,6 +1034,8 @@ def _merge_sustained_free_repetitions(lines: list[VoiceLine]) -> None:
 
 def _should_tie_free_repetition(previous: MusicalEvent, current: MusicalEvent) -> bool:
     total = previous.duration + current.duration
+    if total > 4.0 + 1e-6:
+        return False
     return previous.duration >= 1.0 - 1e-6 or current.duration >= 1.0 - 1e-6 or total >= 2.0 - 1e-6
 
 
@@ -816,6 +1064,83 @@ def _parse_key_name(name: str) -> KeyContext:
     if len(pieces) == 1:
         return KeyContext(pieces[0], "minor")
     return KeyContext(pieces[0], pieces[1])
+
+
+def _candidate_harmony_degrees(broad_degree: int, label: str) -> tuple[int, ...]:
+    if "cadence" in label:
+        candidates = [broad_degree, 2, 5, 1]
+    elif "final" in label:
+        candidates = [broad_degree, 1, 4, 5, 2, 6]
+    else:
+        candidates = [broad_degree, 1, 5, 4, 2, 6, 3]
+    ordered: list[int] = []
+    for degree in candidates:
+        if degree not in ordered:
+            ordered.append(degree)
+    return tuple(ordered)
+
+
+def _harmony_fit_cost(
+    lines: list[VoiceLine],
+    key_context: KeyContext,
+    degree: int,
+    start: float,
+    end: float,
+    broad_degree: int,
+    label: str,
+    previous_degree: int | None,
+) -> float:
+    chord = key_context.chord_pitches(degree, 24, 96, include_seventh=False)
+    chord_pcs = {pitch % 12 for pitch in chord}
+    root_pc = key_context.pitch_from_diatonic_index(degree - 1) % 12
+    cost = 0.0
+    checks = 0
+    for offset in range(int(start), int(math.ceil(end))):
+        active = [line.active_pitch(float(offset)) for line in lines]
+        active = [pitch for pitch in active if pitch is not None]
+        if not active:
+            continue
+        checks += 1
+        chord_members = {pitch % 12 for pitch in active if pitch % 12 in chord_pcs}
+        non_chord_count = sum(1 for pitch in active if pitch % 12 not in chord_pcs)
+        cost += non_chord_count * 5.0
+        if len(active) >= 2 and len(chord_members) < 2:
+            cost += 8.0
+        if len(active) >= 4 and len(chord_members) < 3:
+            cost += 5.0
+        bass = min(active)
+        if bass % 12 not in chord_pcs:
+            cost += 7.0
+        elif bass % 12 == root_pc:
+            cost -= 2.0
+        elif bass % 12 == (root_pc + 7) % 12:
+            cost -= 0.5
+        else:
+            cost += 1.5
+    if checks:
+        cost /= checks
+    if degree == broad_degree:
+        cost -= 4.0 if "cadence" in label else 1.2
+    cost += _harmony_transition_cost(previous_degree, degree)
+    return cost
+
+
+def _harmony_transition_cost(previous_degree: int | None, degree: int) -> float:
+    if previous_degree is None:
+        return 0.0
+    if previous_degree == degree:
+        return 0.8
+    if previous_degree == 5 and degree == 1:
+        return -3.5
+    if previous_degree in {2, 4} and degree == 5:
+        return -2.0
+    if previous_degree == 1 and degree in {4, 5, 6}:
+        return -1.0
+    if degree == 5:
+        return -0.5
+    if degree == 1:
+        return -0.3
+    return 0.4
 
 
 def _section_at(sections: list[HarmonySection], t: float) -> HarmonySection:
@@ -860,15 +1185,148 @@ def _cell_pitch_candidates(
     key_context: KeyContext,
     low: int,
     high: int,
+    previous: int | None = None,
+    intended_interval: int = 0,
 ) -> set[int]:
     candidates = {proposed}
     for raw in range(proposed - 5, proposed + 6):
         candidates.add(key_context.snap_to_scale(raw))
     candidates.update(pitch for pitch in chord if abs(pitch - proposed) <= 5)
     candidates = {pitch for pitch in candidates if low <= pitch <= high}
+    if previous is not None and intended_interval:
+        directed = {
+            pitch
+            for pitch in candidates
+            if (pitch - previous) * intended_interval > 0
+        }
+        if directed:
+            candidates = directed
     if candidates:
         return candidates
     return {_fold_into_range(proposed, low, high)}
+
+
+def _target_chord_context(harmony: list[HarmonySection], t: float) -> tuple[set[int], int]:
+    section = _section_at(harmony, t)
+    key_context = _parse_key_name(section.key_name)
+    degree = section.progression[int(((t - section.start) // 4) % len(section.progression))]
+    chord_pcs = {
+        pitch % 12
+        for pitch in key_context.chord_pitches(
+            degree,
+            24,
+            96,
+            include_seventh=False,
+        )
+    }
+    root_pc = key_context.pitch_from_diatonic_index(degree - 1) % 12
+    return chord_pcs, root_pc
+
+
+def _polish_pitch_candidates(
+    event: MusicalEvent,
+    spec: VoiceSpec,
+    harmony: list[HarmonySection],
+) -> set[int]:
+    chord_pcs, _ = _target_chord_context(harmony, event.offset)
+    section = _section_at(harmony, event.offset)
+    key_context = _parse_key_name(section.key_name)
+    candidates = {event.pitch} if event.pitch is not None else set()
+    if event.pitch is not None:
+        for raw in range(event.pitch - 4, event.pitch + 5):
+            snapped = key_context.snap_to_scale(raw)
+            if spec.low <= snapped <= spec.high:
+                candidates.add(snapped)
+        for pitch in range(spec.low, spec.high + 1):
+            if pitch % 12 in chord_pcs and abs(pitch - event.pitch) <= 5:
+                candidates.add(pitch)
+    return candidates
+
+
+def _has_rapid_repeated_neighbor(events: list[MusicalEvent], event_index: int) -> bool:
+    event = events[event_index]
+    if event.pitch is None or event.label != "free counterpoint":
+        return False
+    neighbors: list[MusicalEvent] = []
+    for previous in reversed(events[:event_index]):
+        if previous.pitch is not None:
+            neighbors.append(previous)
+            break
+    for following in events[event_index + 1 :]:
+        if following.pitch is not None:
+            neighbors.append(following)
+            break
+    for neighbor in neighbors:
+        if neighbor.label != "free counterpoint" or neighbor.pitch != event.pitch:
+            continue
+        before, after = (neighbor, event) if neighbor.offset < event.offset else (event, neighbor)
+        if abs(before.end - after.offset) < 1e-6 and min(before.duration, after.duration) <= 0.5 + 1e-6:
+            return True
+    return False
+
+
+def _previous_event_pitch(events: list[MusicalEvent], event_index: int) -> int | None:
+    for event in reversed(events[:event_index]):
+        if event.pitch is not None:
+            return event.pitch
+    return None
+
+
+def _next_event_pitch(events: list[MusicalEvent], event_index: int) -> int | None:
+    for event in events[event_index + 1 :]:
+        if event.pitch is not None:
+            return event.pitch
+    return None
+
+
+def _target_harmony_pitch_cost(
+    pitch: int,
+    chord_pcs: set[int],
+    root_pc: int,
+    strong: bool,
+    voice_index: int,
+    voice_count: int,
+) -> float:
+    pitch_pc = pitch % 12
+    if pitch_pc not in chord_pcs:
+        return 8.0 if strong else 2.0
+    if voice_index == voice_count - 1:
+        if pitch_pc == root_pc:
+            return 0.0
+        if pitch_pc == (root_pc + 7) % 12:
+            return 1.0
+        return 3.0 if strong else 1.0
+    return 0.0
+
+
+def _harmonic_sonority_cost(
+    active_by_voice: list[int | None],
+    chord_pcs: set[int],
+    root_pc: int,
+    voice_index: int,
+    strong: bool,
+) -> float:
+    active = [pitch for pitch in active_by_voice if pitch is not None]
+    if len(active) < 2:
+        return 0.0
+    chord_members = {pitch % 12 for pitch in active if pitch % 12 in chord_pcs}
+    non_chord_count = sum(1 for pitch in active if pitch % 12 not in chord_pcs)
+    multiplier = 1.0 if strong else 0.25
+    cost = non_chord_count * 4.0 * multiplier
+    if len(active) >= 3 and len(chord_members) < 2:
+        cost += 9.0 * multiplier
+    if len(active) >= 4 and len(chord_members) < 3:
+        cost += 8.0 * multiplier
+    bass = min(active)
+    if bass % 12 not in chord_pcs:
+        cost += 9.0 * multiplier
+    elif bass % 12 not in {root_pc, (root_pc + 7) % 12}:
+        cost += 4.0 * multiplier
+
+    proposed = active_by_voice[voice_index]
+    if proposed is not None and proposed % 12 not in chord_pcs:
+        cost += 2.0 * multiplier
+    return cost
 
 
 def _directional_scale_snap(key_context: KeyContext, previous: int, interval: int) -> int:
@@ -963,6 +1421,10 @@ def _sonority_spacing_cost(
             cost += (3 - gap) * 80
         elif gap > 19:
             cost += (gap - 19) * 4
+    ascending = sorted(active)
+    for index in range(0, len(ascending) - 2):
+        if ascending[index + 2] - ascending[index] <= 4:
+            cost += 800
 
     proposed_pitch = active_by_voice[voice_index]
     if proposed_pitch is not None:

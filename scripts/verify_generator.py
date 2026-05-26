@@ -7,7 +7,7 @@ from pathlib import Path
 from music21 import converter
 
 from fugue_generator.export import write_midi
-from fugue_generator.generator import FugueGenerator, FugueRequest
+from fugue_generator.generator import FugueGenerator, FugueRequest, selection_key
 from fugue_generator.models import GeneratedFugue
 from fugue_generator.theory import KeyContext
 
@@ -34,7 +34,7 @@ def main() -> int:
     failures = []
     for name, request in runs:
         candidates = generator.generate_candidates(request)
-        best = max(candidates, key=lambda candidate: candidate.diagnostics.score)
+        best = max(candidates, key=selection_key)
         output = write_midi(best, args.out_dir / f"{name}.mid", KeyContext(request.key, request.mode))
         parsed = converter.parse(output)
         diversity = _candidate_diversity(candidates)
@@ -45,6 +45,7 @@ def main() -> int:
             "parsed_duration": float(parsed.highestTime),
             "diversity": diversity,
             "audibility": _audibility_observations(best),
+            "harmony": _harmony_observations(best),
             "best": best.diagnostics.to_dict(),
             "candidate_scores": [candidate.diagnostics.score for candidate in candidates],
         }
@@ -84,6 +85,8 @@ def _quality_failures(
         failures.append(f"{request.voices}-voice fugue has sub-sixteenth-note values")
     if diag.melody_issues != 0:
         failures.append(f"{request.voices}-voice fugue has weak voice-line melody metrics")
+    if diag.repeated_attack_issues != 0:
+        failures.append(f"{request.voices}-voice fugue has rapid repeated free-counterpoint attacks")
     if diag.free_stagnation_issues != 0:
         failures.append(f"{request.voices}-voice fugue has static free-counterpoint spans")
     if diag.free_rhythm_issues != 0:
@@ -157,12 +160,84 @@ def _audibility_observations(fugue: GeneratedFugue) -> dict[str, object]:
             "average_active_voices": vertical_samples["average_active_voices"],
             "strong_dissonance_rate": vertical_samples["strong_dissonance_rate"],
             "vertical_cluster_times": fugue.diagnostics.vertical_clusters,
+            "repeated_attack_issues": fugue.diagnostics.repeated_attack_issues,
+            "harmonic_clarity_issues": fugue.diagnostics.harmonic_clarity_issues,
             "free_sixteenth_notes": sum(item["free_rhythm_profile"]["sixteenth_notes"] for item in per_voice),
             "free_dotted_notes": sum(item["free_rhythm_profile"]["dotted_notes"] for item in per_voice),
             "free_long_notes": sum(item["free_rhythm_profile"]["long_notes"] for item in per_voice),
             "aligned_start_fraction": rhythm_independence["aligned_start_fraction"],
         },
     }
+
+
+def _harmony_observations(fugue: GeneratedFugue) -> dict[str, object]:
+    checks = 0
+    two_chord_members = 0
+    full_triad = 0
+    majority_non_chord = 0
+    bass_root_or_fifth = 0
+    non_chord_tones = 0
+    active_tones = 0
+    for t in [round(i * 1.0, 6) for i in range(int(fugue.diagnostics.total_duration) + 1)]:
+        active = [voice.active_pitch(t) for voice in fugue.voices]
+        active = [pitch for pitch in active if pitch is not None]
+        if len(active) < 2:
+            continue
+        chord_pcs, root_pc, _, _ = _target_chord_pcs(fugue, t)
+        chord_members = {pitch % 12 for pitch in active if pitch % 12 in chord_pcs}
+        non_chord_count = sum(1 for pitch in active if pitch % 12 not in chord_pcs)
+        checks += 1
+        active_tones += len(active)
+        non_chord_tones += non_chord_count
+        if len(chord_members) >= 2:
+            two_chord_members += 1
+        if len(active) >= 3 and len(chord_members) >= 3:
+            full_triad += 1
+        if non_chord_count > len(active) // 2:
+            majority_non_chord += 1
+        bass = min(active)
+        if bass % 12 in {root_pc, (root_pc + 7) % 12}:
+            bass_root_or_fifth += 1
+    return {
+        "samples": checks,
+        "two_chord_member_rate": round(two_chord_members / max(1, checks), 3),
+        "full_triad_rate": round(full_triad / max(1, checks), 3),
+        "majority_non_chord_rate": round(majority_non_chord / max(1, checks), 3),
+        "non_chord_tone_rate": round(non_chord_tones / max(1, active_tones), 3),
+        "bass_root_or_fifth_rate": round(bass_root_or_fifth / max(1, checks), 3),
+        "inferred_measure_progression": _compact_measure_progression(fugue),
+    }
+
+
+def _target_chord_pcs(fugue: GeneratedFugue, t: float) -> tuple[set[int], int, int, str]:
+    section = _section_at(fugue.harmony, t)
+    key_context = _parse_key_name(section.key_name)
+    degree = section.progression[int(((t - section.start) // 4) % len(section.progression))]
+    chord_pcs = {
+        pitch % 12
+        for pitch in key_context.chord_pitches(
+            degree,
+            24,
+            96,
+            include_seventh=False,
+        )
+    }
+    root_pc = key_context.pitch_from_diatonic_index(degree - 1) % 12
+    return chord_pcs, root_pc, degree, section.key_name
+
+
+def _compact_measure_progression(fugue: GeneratedFugue) -> list[str]:
+    values = []
+    measure_count = int(fugue.diagnostics.total_duration // 4)
+    for measure in range(measure_count):
+        t = float(measure * 4)
+        _, _, degree, key_name = _target_chord_pcs(fugue, t)
+        values.append(f"{key_name}:{degree}")
+    compacted: list[str] = []
+    for value in values:
+        if not compacted or compacted[-1] != value:
+            compacted.append(value)
+    return compacted
 
 
 def _vertical_samples(fugue: GeneratedFugue) -> dict[str, object]:
@@ -279,6 +354,20 @@ def _histogram(values) -> dict[str, int]:
         key = str(round(float(value), 3))
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items(), key=lambda item: float(item[0])))
+
+
+def _parse_key_name(name: str) -> KeyContext:
+    pieces = name.split()
+    if len(pieces) == 1:
+        return KeyContext(pieces[0], "minor")
+    return KeyContext(pieces[0], pieces[1])
+
+
+def _section_at(sections, t: float):
+    for section in sections:
+        if section.start <= t < section.end:
+            return section
+    return sections[-1]
 
 
 if __name__ == "__main__":

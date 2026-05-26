@@ -2,7 +2,12 @@ from collections import Counter
 import random
 
 from fugue_generator.style import CorpusStyleModel
-from fugue_generator.style import StyleCell, _top_style_cells, _update_cell_counter
+from fugue_generator.style import (
+    StyleCell,
+    _merge_contiguous_repeated_runs,
+    _top_style_cells,
+    _update_cell_counter,
+)
 
 
 def test_style_penalty_prefers_seen_patterns() -> None:
@@ -59,3 +64,16 @@ def test_sample_cell_can_return_learned_sixteenth_cell() -> None:
 
     assert cell.durations == (0.25, 0.25, 0.5)
     assert cell.rhythm_class == "sixteenth"
+
+
+def test_contiguous_same_pitch_runs_are_learned_as_sustains() -> None:
+    merged = _merge_contiguous_repeated_runs(
+        [
+            (0.0, 60, 0.25),
+            (0.25, 60, 0.25),
+            (0.5, 62, 0.25),
+            (1.0, 62, 0.25),
+        ]
+    )
+
+    assert merged == [(0.0, 60, 0.5), (0.5, 62, 0.25), (1.0, 62, 0.25)]

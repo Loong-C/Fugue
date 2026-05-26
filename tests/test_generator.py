@@ -5,6 +5,7 @@ from fugue_generator.generator import (
     FugueGenerator,
     FugueRequest,
     _directional_scale_snap,
+    _has_rapid_repeated_neighbor,
     _merge_sustained_free_repetitions,
 )
 from fugue_generator.models import MusicalEvent, VoiceLine, VoiceSpec
@@ -60,6 +61,16 @@ def test_sustained_free_repetitions_are_tied() -> None:
     ]
 
 
+def test_weak_rapid_repeated_neighbors_are_visible_to_polisher() -> None:
+    events = [
+        MusicalEvent(0.0, 0.75, 60, "free counterpoint"),
+        MusicalEvent(0.75, 0.25, 60, "free counterpoint"),
+        MusicalEvent(1.0, 0.5, 62, "free counterpoint"),
+    ]
+
+    assert _has_rapid_repeated_neighbor(events, 1)
+
+
 def test_generate_three_voice_fugue_has_clean_entries(tmp_path: Path) -> None:
     subject = _theme(tmp_path / "subject.theme")
     generator = FugueGenerator(Path.cwd(), _test_style())
@@ -86,6 +97,7 @@ def test_generate_three_voice_fugue_has_clean_entries(tmp_path: Path) -> None:
     assert fugue.diagnostics.rhythmic_grid_violations == 0
     assert fugue.diagnostics.short_note_count == 0
     assert fugue.diagnostics.melody_issues == 0
+    assert fugue.diagnostics.repeated_attack_issues == 0
     assert fugue.diagnostics.free_stagnation_issues == 0
     assert fugue.diagnostics.free_rhythm_issues == 0
     assert fugue.diagnostics.vertical_clusters == 0
@@ -119,6 +131,7 @@ def test_generate_four_voice_fugue_writes_midi(tmp_path: Path) -> None:
     assert fugue.diagnostics.rhythmic_grid_violations == 0
     assert fugue.diagnostics.short_note_count == 0
     assert fugue.diagnostics.melody_issues == 0
+    assert fugue.diagnostics.repeated_attack_issues == 0
     assert fugue.diagnostics.free_stagnation_issues == 0
     assert fugue.diagnostics.free_rhythm_issues == 0
     assert fugue.diagnostics.vertical_clusters == 0
