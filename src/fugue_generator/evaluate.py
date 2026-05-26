@@ -35,7 +35,7 @@ def evaluate_voice_lines(
                 range_violations += 1
             if not _is_on_grid(event.offset, 0.25) or not _is_on_grid(event.duration, 0.25):
                 rhythmic_grid_violations += 1
-            if event.pitch is not None and event.duration < 0.5 - 1e-6:
+            if event.pitch is not None and event.duration < 0.25 - 1e-6:
                 short_note_count += 1
         for first, second in zip(sorted_events, sorted_events[1:]):
             if first.end > second.offset + 1e-6:
@@ -161,7 +161,7 @@ def _free_counterpoint_issues(events) -> tuple[int, int]:
             run_count += 1
             run_duration += event.duration
         else:
-            if run_count >= 4 or run_duration >= 4.0 - 1e-6:
+            if _is_static_free_run(run_count, run_duration):
                 stagnation += 1
             run_pitch = event.pitch
             run_count = 1
@@ -169,13 +169,17 @@ def _free_counterpoint_issues(events) -> tuple[int, int]:
 
         if event.duration > 4.0 + 1e-6:
             stagnation += 1
-        if event.duration > 2.0 + 1e-6 and round(event.duration, 6) not in stable_long_values:
+        if event.duration > 4.0 + 1e-6 and round(event.duration, 6) not in stable_long_values:
             rhythm += 1
-        if event.duration > 2.0 + 1e-6 and not _is_on_grid(event.offset, 1.0):
+        if event.duration > 4.0 + 1e-6 and not _is_on_grid(event.offset, 1.0):
             rhythm += 1
-    if run_count >= 4 or run_duration >= 4.0 - 1e-6:
+    if _is_static_free_run(run_count, run_duration):
         stagnation += 1
     return stagnation, rhythm
+
+
+def _is_static_free_run(run_count: int, run_duration: float) -> bool:
+    return run_count >= 5 or (run_count >= 2 and run_duration >= 4.0 - 1e-6)
 
 
 def _has_vertical_cluster(pitches: list[int]) -> bool:

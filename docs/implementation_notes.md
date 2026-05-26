@@ -24,7 +24,7 @@ The current generator follows the hybrid route proposed in `feasibility_plan.md`
   checked on the same half-beat grid used by the evaluator.
 - `Evaluator`: `evaluate.py` reports entries, parallel fifths/octaves, crossings,
   range violations, strong dissonances, monophonic overlaps, rhythmic grid errors,
-  sub-half-beat notes, melody issues, free-counterpoint stagnation, unstable
+  sub-sixteenth notes, melody issues, free-counterpoint stagnation, unstable
   free-counterpoint rhythm, vertical clusters, total duration, seed, and style source.
 - `Exporter`: `export.py` writes MIDI and optional MusicXML through `music21`.
 
@@ -49,7 +49,7 @@ Observed diagnostic from the current implementation:
 - Range violations: 0.
 - Monophonic overlaps: 0.
 - Rhythmic grid violations: 0.
-- Sub-half-beat notes: 0.
+- Sub-sixteenth notes: 0.
 - Melody issues: 0.
 - Free-counterpoint stagnation issues: 0.
 - Free-counterpoint rhythm issues: 0.
@@ -58,9 +58,12 @@ Observed diagnostic from the current implementation:
   from the stochastic free counterpoint layer.
 - Candidate diversity from `scripts/verify_generator.py --variants 16`: 16 entry plans,
   16 score values, and 16 top-voice contours.
-- Audibility observations from the verification report: maximum repeated free run is
-  3 notes / 3 beats, minimum unique pitches per voice is 12, average active voices is
-  3.585, and strong-beat dissonance rate is 0.059.
+- Audibility observations from the verification report: free counterpoint now contains
+  sixteenth notes, dotted or odd-quarter-grid durations, syncopated starts, and long
+  notes. In the current default 16-candidate run the 4-voice winner has 91 free
+  sixteenth notes, 9 dotted/odd-grid notes, 41 long notes, an aligned-start fraction
+  of 0.773, maximum repeated free run of 4 notes / 4 beats, average active voices of
+  3.585, and strong-beat dissonance rate of 0.066.
 
 Three-voice smoke command:
 
@@ -77,16 +80,17 @@ Observed diagnostic:
 - Range violations: 0.
 - Monophonic overlaps: 0.
 - Rhythmic grid violations: 0.
-- Sub-half-beat notes: 0.
+- Sub-sixteenth notes: 0.
 - Melody issues: 0.
 - Free-counterpoint stagnation issues: 0.
 - Free-counterpoint rhythm issues: 0.
 - Vertical clusters: 0.
 - Candidate diversity from `scripts/verify_generator.py --variants 16`: 16 entry plans,
-  15 score values, and 12 top-voice contours.
-- Audibility observations from the verification report: maximum repeated free run is
-  3 notes / 3 beats, minimum unique pitches per voice is 15, average active voices is
-  2.781, and strong-beat dissonance rate is 0.039.
+  14 score values, and 13 top-voice contours.
+- Audibility observations from the verification report: the 3-voice winner has 45 free
+  sixteenth notes, 7 dotted/odd-grid notes, 42 long notes, an aligned-start fraction
+  of 0.621, maximum repeated free run of 2 notes / 4 beats, average active voices of
+  2.781, and strong-beat dissonance rate of 0.032.
 
 ## Verification Script
 
@@ -98,12 +102,13 @@ Run:
 
 The script generates 4-voice and 3-voice fugues, parses the MIDI outputs with `music21`,
 and fails if the best candidate has parallel fifths, parallel octaves, range violations,
-monophonic overlaps, rhythmic grid instability, sub-half-beat notes, weak voice-line
+monophonic overlaps, rhythmic grid instability, sub-sixteenth notes, weak voice-line
 melody metrics, static free-counterpoint spans, unstable free-counterpoint rhythm,
 vertical clusters, too few entries, or insufficient candidate diversity. It also writes
 per-voice horizontal rhythm/melody observations and vertical texture observations:
-duration histograms, maximum repeated free-note runs, pitch spans, active-voice density,
-strong-beat dissonance rate, and low-spacing samples. It writes outputs to
+duration histograms, rhythm profiles for sixteenth/dotted/long/syncopated material,
+maximum repeated free-note runs, pitch spans, active-voice density, aligned-start
+fraction, strong-beat dissonance rate, and low-spacing samples. It writes outputs to
 `out/verification/`.
 
 ## Root Cause Fix for Static Free Counterpoint
@@ -127,6 +132,47 @@ The fix is structural:
   tones;
 - rank 16 candidates by the same diagnostics used for verification so clear, human-like
   candidates win over merely safe static ones.
+
+## Root Cause Fix for Rhythm Collapse
+
+The later hymn-like rhythm problem was caused by representation collapse rather than
+missing weights. The first cell model fixed repeated-note stagnation by learning
+melodic-rhythmic cells, but the extractor then discarded every duration below a half
+beat and quantized all cell durations and phases to the half-beat grid. The decoder
+reapplied the same half-beat quantization. As a result, the learned cell table contained
+only plain eighth/quarter material plus a few long values; generated free counterpoint
+could not produce sixteenth runs, dotted values, or independent off-beat starts even
+though the raw corpora contained them.
+
+The fix is structural:
+
+- melodic cells are extracted and cached on the quarter-beat grid;
+- each cell stores a learned rhythm class: `plain`, `sixteenth`, `dotted`,
+  `syncopated`, or `long`;
+- top-cell selection is stratified by rhythm class so rarer but real fugue gestures are
+  not pushed out by globally frequent plain cells;
+- rhythm-class priors are corrected by duration density and blended with the raw
+  duration distribution, so sixteenth-note windows become local episodes rather than
+  the default texture;
+- cell decoding keeps quarter-grid durations instead of snapping them back to half
+  beats;
+- interval realization uses directional scale snapping, preserving upward and downward
+  learned motion instead of letting chromatic intervals collapse back to the same scale
+  tone;
+- weak-grid vertical scoring allows passing and neighboring dissonances more than
+  strong beats, while fixed-entry/cadence boundaries are checked for parallel perfects;
+- adjacent same-pitch long free-counterpoint events are tied into sustained notes, so
+  long tones are represented as long tones instead of repeated attacks.
+
+The current audition set is in `out/audition_2026-05-26_rhythm/`:
+
+- `c_minor_4voice_rhythm_cells.mid`
+- `c_minor_4voice_alt_seed1313.mid`
+- `d_minor_3voice_rhythm_cells.mid`
+
+All three parse with the expected voice count and report zero parallel fifths/octaves,
+zero rhythmic grid violations, zero sub-sixteenth notes, zero free-counterpoint
+stagnation, and zero unstable free-counterpoint rhythm issues.
 
 ## Known Limitations
 

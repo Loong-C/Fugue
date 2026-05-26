@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+STYLE_PROFILE_VERSION = 8
+RHYTHM_CLASSES = ("plain", "sixteenth", "dotted", "syncopated", "long")
+
 DEFAULT_INTERVAL_WEIGHTS = {
     -7: 3,
     -5: 8,
@@ -40,6 +43,7 @@ class StyleCell:
     intervals: tuple[int, ...]
     phase: float
     weight: float
+    rhythm_class: str = "plain"
 
     @property
     def span(self) -> float:
@@ -51,15 +55,20 @@ class StyleCell:
             "intervals": list(self.intervals),
             "phase": self.phase,
             "weight": self.weight,
+            "rhythm_class": self.rhythm_class,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, object]) -> "StyleCell":
+        durations = tuple(float(value) for value in data.get("durations", []))
+        phase = float(data.get("phase", 0.0))
+        rhythm_class = str(data.get("rhythm_class") or _classify_rhythm(durations, phase))
         return cls(
-            tuple(float(value) for value in data.get("durations", [])),
+            durations,
             tuple(int(value) for value in data.get("intervals", [])),
-            float(data.get("phase", 0.0)),
+            phase,
             float(data.get("weight", 1.0)),
+            rhythm_class,
         )
 
 
@@ -72,12 +81,22 @@ class CorpusStyleModel:
     source: str = "built-in"
     duration_phase_weights: dict[float, dict[float, float]] = field(default_factory=dict)
     melodic_cells: list[StyleCell] = field(default_factory=list)
+    rhythm_class_weights: dict[str, float] = field(default_factory=dict)
+    melodic_cells_by_phase: dict[float, list[StyleCell]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.duration_phase_weights:
             self.duration_phase_weights = _default_phase_weights(self.duration_weights)
         if not self.melodic_cells:
             self.melodic_cells = _fallback_style_cells()
+        if not self.rhythm_class_weights:
+            self.rhythm_class_weights = _rhythm_class_weights(
+                _style_cells_to_counter(self.melodic_cells),
+                self.duration_weights,
+            )
+        self.melodic_cells_by_phase = {}
+        for cell in self.melodic_cells:
+            self.melodic_cells_by_phase.setdefault(cell.phase, []).append(cell)
 
     @classmethod
     def load(
@@ -90,10 +109,13 @@ class CorpusStyleModel:
         if cache.exists() and not rebuild:
             data = json.loads(cache.read_text(encoding="utf-8"))
             if (
+                data.get("schema_version") != STYLE_PROFILE_VERSION
+                or
                 "interval_transitions" not in data
                 or "duration_transitions" not in data
                 or "duration_phase_weights" not in data
                 or "melodic_cells" not in data
+                or "rhythm_class_weights" not in data
             ):
                 return cls.load(root, cache, rebuild=True)
             return cls(
@@ -113,6 +135,7 @@ class CorpusStyleModel:
                     for k, value in data["duration_phase_weights"].items()
                 },
                 [StyleCell.from_dict(value) for value in data["melodic_cells"]],
+                {str(k): float(v) for k, v in data["rhythm_class_weights"].items()},
             )
 
         jsb = root / "data" / "raw" / "jsb-chorales-dataset" / "Jsb16thSeparated.json"
@@ -131,12 +154,14 @@ class CorpusStyleModel:
         cache.write_text(
             json.dumps(
                 {
+                    "schema_version": STYLE_PROFILE_VERSION,
                     "interval_weights": model.interval_weights,
                     "duration_weights": model.duration_weights,
                     "interval_transitions": model.interval_transitions,
                     "duration_transitions": model.duration_transitions,
                     "duration_phase_weights": model.duration_phase_weights,
                     "melodic_cells": [cell.to_dict() for cell in model.melodic_cells],
+                    "rhythm_class_weights": model.rhythm_class_weights,
                     "source": model.source,
                 },
                 indent=2,
@@ -182,6 +207,7 @@ class CorpusStyleModel:
             f"JSB chorales Markov profile: {path}",
             _counter_map_to_dict(duration_phase_counter),
             _top_style_cells(cell_counter),
+            _rhythm_class_weights(cell_counter, duration_counter),
         )
 
     def augment_from_humdrum_fugues(self, fugue_dir: Path, max_scores: int = 48) -> None:
@@ -229,6 +255,7 @@ class CorpusStyleModel:
             self.duration_transitions = _counter_map_to_dict(duration_transition_counter)
             self.duration_phase_weights = _counter_map_to_dict(duration_phase_counter)
             self.melodic_cells = _top_style_cells(cell_counter)
+            self.rhythm_class_weights = _rhythm_class_weights(cell_counter, duration_counter)
             self.source = f"{self.source}; WTC fugues: {fugue_dir} ({parsed} scores)"
 
     def sample_interval(
@@ -277,19 +304,24 @@ class CorpusStyleModel:
         previous_duration: float | None = None,
     ) -> StyleCell:
         phase_key = None if phase is None else _phase_key(phase)
+        source_cells = self.melodic_cells
+        if phase_key is not None and phase_key in self.melodic_cells_by_phase:
+            source_cells = self.melodic_cells_by_phase[phase_key]
         candidates = [
             cell
-            for cell in self.melodic_cells
+            for cell in source_cells
             if cell.span <= remaining + 1e-6
-            and (remaining - cell.span < 1e-6 or remaining - cell.span >= 0.5 - 1e-6)
+            and (remaining - cell.span < 1e-6 or remaining - cell.span >= 0.25 - 1e-6)
         ]
-        if phase_key is not None:
-            phase_candidates = [cell for cell in candidates if abs(cell.phase - phase_key) < 1e-6]
-            if phase_candidates:
-                candidates = phase_candidates
         if candidates:
-            weights = {index: cell.weight for index, cell in enumerate(candidates)}
-            return candidates[int(_weighted_sample(weights, rng, temperature))]
+            candidates_by_class: dict[str, list[StyleCell]] = {}
+            for cell in candidates:
+                candidates_by_class.setdefault(cell.rhythm_class, []).append(cell)
+            class_weights = _candidate_class_weights(candidates_by_class, self.rhythm_class_weights)
+            rhythm_class = str(_weighted_sample(class_weights, rng, max(1.0, temperature * 1.2)))
+            class_candidates = candidates_by_class.get(rhythm_class, candidates)
+            weights = {index: cell.weight for index, cell in enumerate(class_candidates)}
+            return class_candidates[int(_weighted_sample(weights, rng, temperature))]
 
         duration = self.sample_duration(
             rng,
@@ -299,7 +331,14 @@ class CorpusStyleModel:
             phase=phase,
         )
         interval = self.sample_interval(rng, temperature, previous_interval=previous_interval)
-        return StyleCell((duration,), (interval,), 0.0 if phase_key is None else phase_key, 1.0)
+        phase_value = 0.0 if phase_key is None else phase_key
+        return StyleCell(
+            (duration,),
+            (interval,),
+            phase_value,
+            1.0,
+            _classify_rhythm((duration,), phase_value),
+        )
 
     def interval_penalty(self, interval: int, previous_interval: int | None = None) -> float:
         interval = max(-12, min(12, int(interval)))
@@ -346,10 +385,10 @@ class CorpusStyleModel:
 
 
 def _weighted_sample(
-    weights: dict[int | float, float],
+    weights: dict[object, float],
     rng: random.Random,
     temperature: float,
-) -> int | float:
+) -> object:
     temperature = max(0.1, temperature)
     items = list(weights.items())
     adjusted = [math.pow(max(weight, 0.0001), 1.0 / temperature) for _, weight in items]
@@ -407,7 +446,7 @@ def _update_melodic_counters(
     interval_transition_counter: dict[int, Counter[int]],
     duration_transition_counter: dict[float, Counter[float]],
     duration_phase_counter: dict[float, Counter[float]],
-    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float]],
+    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]],
 ) -> None:
     if not note_runs:
         return
@@ -442,11 +481,11 @@ def _dict_to_counter_map(values: dict[int | float, dict[int | float, float]]) ->
 
 def _update_cell_counter(
     note_runs: list[tuple[float, int, float]],
-    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float]],
+    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]],
 ) -> None:
-    if len(note_runs) < 4:
+    if len(note_runs) < 3:
         return
-    for start in range(1, len(note_runs) - 2):
+    for start in range(1, len(note_runs) - 1):
         phase = _phase_key(note_runs[start][0])
         durations: list[float] = []
         intervals: list[int] = []
@@ -455,36 +494,62 @@ def _update_cell_counter(
         for offset, pitch, duration in note_runs[start : start + 8]:
             if abs(offset - note_runs[start][0] - span) > 0.25 + 1e-6:
                 break
-            if duration < 0.5 - 1e-6:
+            if duration < 0.25 - 1e-6:
                 break
-            quantized_duration = _quantize(duration, 0.5)
-            if quantized_duration > 2.0 + 1e-6:
+            quantized_duration = _quantize(duration, 0.25)
+            if quantized_duration > 4.0 + 1e-6:
                 break
             interval = max(-12, min(12, int(pitch - previous_pitch)))
             durations.append(quantized_duration)
             intervals.append(interval)
             span = round(span + quantized_duration, 6)
             previous_pitch = pitch
-            if 2.0 - 1e-6 <= span <= 4.0 + 1e-6 and len(durations) >= 3:
-                cell_counter[(tuple(durations), tuple(intervals), phase)] += 1
+            if 1.0 - 1e-6 <= span <= 4.0 + 1e-6:
+                duration_tuple = tuple(durations)
+                rhythm_class = _classify_rhythm(duration_tuple, phase)
+                if len(durations) >= _minimum_cell_notes(rhythm_class):
+                    cell_counter[(duration_tuple, tuple(intervals), phase, rhythm_class)] += 1
             if span >= 4.0 - 1e-6:
                 break
 
 
 def _top_style_cells(
-    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float]],
-    limit: int = 4096,
+    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]],
+    limit: int = 6144,
 ) -> list[StyleCell]:
+    if not cell_counter:
+        return _fallback_style_cells()
+
+    by_class: dict[str, list[tuple[tuple[tuple[float, ...], tuple[int, ...], float, str], float]]] = {}
+    for key, weight in cell_counter.items():
+        by_class.setdefault(key[3], []).append((key, float(weight)))
+
+    selected: dict[tuple[tuple[float, ...], tuple[int, ...], float, str], float] = {}
+    class_limit = max(64, limit // max(1, len(by_class)))
+    for rhythm_class in RHYTHM_CLASSES:
+        items = by_class.get(rhythm_class, [])
+        items.sort(key=lambda item: item[1], reverse=True)
+        for key, weight in items[:class_limit]:
+            selected[key] = weight
+
+    if len(selected) < limit:
+        for key, weight in cell_counter.most_common(limit):
+            selected.setdefault(key, float(weight))
+            if len(selected) >= limit:
+                break
+
+    ranked = sorted(selected.items(), key=lambda item: item[1], reverse=True)
     return [
-        StyleCell(durations, intervals, phase, float(weight))
-        for (durations, intervals, phase), weight in cell_counter.most_common(limit)
+        StyleCell(durations, intervals, phase, float(weight), rhythm_class)
+        for (durations, intervals, phase, rhythm_class), weight in ranked[:limit]
     ]
 
 
-def _style_cells_to_counter(cells: list[StyleCell]) -> Counter[tuple[tuple[float, ...], tuple[int, ...], float]]:
-    counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float]] = Counter()
+def _style_cells_to_counter(cells: list[StyleCell]) -> Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]]:
+    counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]] = Counter()
     for cell in cells:
-        counter[(cell.durations, cell.intervals, cell.phase)] += cell.weight
+        rhythm_class = cell.rhythm_class or _classify_rhythm(cell.durations, cell.phase)
+        counter[(cell.durations, cell.intervals, cell.phase, rhythm_class)] += cell.weight
     return counter
 
 
@@ -492,29 +557,126 @@ def _fallback_style_cells() -> list[StyleCell]:
     patterns = [
         ((0.5, 0.5, 1.0), (2, 1, -1)),
         ((0.5, 0.5, 1.0), (-2, -1, 1)),
+        ((0.25, 0.25, 0.5, 1.0), (1, 2, -1, -2)),
+        ((0.25, 0.25, 0.25, 0.25, 1.0), (-1, -2, 1, 2, 1)),
+        ((0.75, 0.25, 0.5, 0.5), (2, -1, -2, 1)),
+        ((0.5, 0.75, 0.25, 0.5), (-2, 1, 2, -1)),
         ((0.5, 0.5, 1.0), (1, 2, 2)),
         ((0.5, 0.5, 1.0), (-1, -2, -2)),
         ((1.0, 0.5, 0.5), (2, -1, -2)),
         ((1.0, 0.5, 0.5), (-2, 1, 2)),
+        ((0.5, 1.0, 0.5), (2, -1, 1)),
+        ((1.5, 0.5, 1.0), (-2, 1, 2)),
+        ((2.0, 0.5, 0.5), (1, 2, -1)),
         ((1.0, 1.0, 1.0), (2, 1, -2)),
         ((1.0, 1.0, 1.0), (-2, -1, 2)),
         ((0.5, 0.5, 0.5, 0.5), (1, 2, -1, -2)),
         ((0.5, 0.5, 0.5, 0.5), (-1, -2, 1, 2)),
     ]
     cells: list[StyleCell] = []
-    for phase in (0.0, 1.0, 2.0, 3.0):
+    for phase in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
         for index, (durations, intervals) in enumerate(patterns):
-            cells.append(StyleCell(durations, intervals, phase, float(len(patterns) - index)))
+            cells.append(
+                StyleCell(
+                    durations,
+                    intervals,
+                    phase,
+                    float(len(patterns) - index),
+                    _classify_rhythm(durations, phase),
+                )
+            )
     return cells
 
 
 def _default_phase_weights(duration_weights: dict[float, float]) -> dict[float, dict[float, float]]:
     normalized = {float(duration): float(weight) for duration, weight in duration_weights.items()}
-    return {phase: dict(normalized) for phase in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5)}
+    return {round(index * 0.25, 6): dict(normalized) for index in range(16)}
 
 
 def _phase_key(offset: float) -> float:
-    return _quantize(offset % 4.0, 0.5)
+    return _quantize(offset % 4.0, 0.25)
+
+
+def _classify_rhythm(durations: tuple[float, ...], phase: float = 0.0) -> str:
+    values = tuple(_quantize(float(duration), 0.25) for duration in durations)
+    if any(duration < 0.5 - 1e-6 for duration in values):
+        return "sixteenth"
+    if any(_is_odd_quarter_duration(duration) for duration in values):
+        return "dotted"
+
+    cursor = _quantize(phase, 0.25)
+    for duration in values:
+        beat_phase = round(cursor % 1.0, 6)
+        crosses_beat = math.floor(cursor + 1e-6) < math.floor(cursor + duration - 1e-6)
+        if beat_phase in {0.25, 0.75} or (abs(beat_phase - 0.5) < 1e-6 and crosses_beat):
+            return "syncopated"
+        cursor = round(cursor + duration, 6)
+
+    if any(duration >= 2.0 - 1e-6 for duration in values):
+        return "long"
+    return "plain"
+
+
+def _is_odd_quarter_duration(duration: float) -> bool:
+    units = round(duration / 0.25)
+    return units % 2 == 1 and units > 1
+
+
+def _minimum_cell_notes(rhythm_class: str) -> int:
+    return 2 if rhythm_class in {"dotted", "long"} else 3
+
+
+def _rhythm_class_weights(
+    cell_counter: Counter[tuple[tuple[float, ...], tuple[int, ...], float, str]],
+    duration_weights: dict[float, float] | Counter[float] | None = None,
+) -> dict[str, float]:
+    weights = {rhythm_class: 0.0 for rhythm_class in RHYTHM_CLASSES}
+    for (durations, _, _, rhythm_class), weight in cell_counter.items():
+        span = max(0.25, sum(durations))
+        event_count = max(1, len(durations))
+        density_corrected = (span * span) / math.pow(event_count, 2.0)
+        weights[rhythm_class] = weights.get(rhythm_class, 0.0) + float(weight) * density_corrected
+    if duration_weights:
+        duration_priors = _duration_rhythm_class_weights(duration_weights)
+        weights = {
+            rhythm_class: math.sqrt(max(weight, 0.0001) * max(duration_priors.get(rhythm_class, 0.0001), 0.0001))
+            for rhythm_class, weight in weights.items()
+        }
+    return {key: value for key, value in weights.items() if value > 0.0}
+
+
+def _duration_rhythm_class_weights(duration_weights: dict[float, float] | Counter[float]) -> dict[str, float]:
+    weights = {rhythm_class: 0.0 for rhythm_class in RHYTHM_CLASSES}
+    plain_durations = {0.5, 1.0}
+    for raw_duration, raw_weight in duration_weights.items():
+        duration = _quantize(float(raw_duration), 0.25)
+        weight = float(raw_weight)
+        units = round(duration / 0.25)
+        if duration < 0.5 - 1e-6:
+            weights["sixteenth"] += weight * duration
+        elif units % 2 == 1 and units > 1:
+            weights["dotted"] += weight * duration
+        elif duration >= 2.0 - 1e-6:
+            weights["long"] += weight
+        elif duration in plain_durations:
+            weights["plain"] += weight * duration
+    weights["syncopated"] = max(weights["syncopated"], weights["dotted"], weights["plain"] * 0.08)
+    return weights
+
+
+def _candidate_class_weights(
+    candidates_by_class: dict[str, list[StyleCell]],
+    rhythm_class_weights: dict[str, float],
+) -> dict[object, float]:
+    available = {
+        rhythm_class: max(rhythm_class_weights.get(rhythm_class, 0.0), 0.0)
+        for rhythm_class in candidates_by_class
+    }
+    if not available:
+        return {}
+    average = sum(available.values()) / max(1, len(available))
+    floor = max(1.0, average * 0.18)
+    return {rhythm_class: max(weight, floor) for rhythm_class, weight in available.items()}
 
 
 def _quantize(value: float, grid: float) -> float:

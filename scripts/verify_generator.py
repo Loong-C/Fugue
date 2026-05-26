@@ -81,7 +81,7 @@ def _quality_failures(
     if diag.rhythmic_grid_violations != 0:
         failures.append(f"{request.voices}-voice fugue has unstable rhythmic grid positions")
     if diag.short_note_count != 0:
-        failures.append(f"{request.voices}-voice fugue has sub-half-beat notes")
+        failures.append(f"{request.voices}-voice fugue has sub-sixteenth-note values")
     if diag.melody_issues != 0:
         failures.append(f"{request.voices}-voice fugue has weak voice-line melody metrics")
     if diag.free_stagnation_issues != 0:
@@ -138,15 +138,18 @@ def _audibility_observations(fugue: GeneratedFugue) -> dict[str, object]:
                 "unique_pitches": len(set(pitches)),
                 "pitch_span": 0 if not pitches else max(pitches) - min(pitches),
                 "free_duration_histogram": durations,
+                "free_rhythm_profile": _rhythm_profile(free),
                 "max_free_repeated_run_notes": max_run_notes,
                 "max_free_repeated_run_beats": round(max_run_beats, 3),
             }
         )
 
     vertical_samples = _vertical_samples(fugue)
+    rhythm_independence = _rhythm_independence(fugue)
     return {
         "per_voice": per_voice,
         "vertical": vertical_samples,
+        "rhythm_independence": rhythm_independence,
         "summary": {
             "max_free_repeated_run_notes": max(item["max_free_repeated_run_notes"] for item in per_voice),
             "max_free_repeated_run_beats": max(item["max_free_repeated_run_beats"] for item in per_voice),
@@ -154,6 +157,10 @@ def _audibility_observations(fugue: GeneratedFugue) -> dict[str, object]:
             "average_active_voices": vertical_samples["average_active_voices"],
             "strong_dissonance_rate": vertical_samples["strong_dissonance_rate"],
             "vertical_cluster_times": fugue.diagnostics.vertical_clusters,
+            "free_sixteenth_notes": sum(item["free_rhythm_profile"]["sixteenth_notes"] for item in per_voice),
+            "free_dotted_notes": sum(item["free_rhythm_profile"]["dotted_notes"] for item in per_voice),
+            "free_long_notes": sum(item["free_rhythm_profile"]["long_notes"] for item in per_voice),
+            "aligned_start_fraction": rhythm_independence["aligned_start_fraction"],
         },
     }
 
@@ -218,6 +225,52 @@ def _max_repeated_run(events) -> tuple[int, float]:
     best_count = max(best_count, run_count)
     best_duration = max(best_duration, run_duration)
     return best_count, best_duration
+
+
+def _rhythm_profile(events) -> dict[str, int]:
+    sixteenth_notes = 0
+    dotted_notes = 0
+    long_notes = 0
+    syncopated_onsets = 0
+    beat_crossing_syncopations = 0
+    for event in events:
+        units = round(event.duration / 0.25)
+        if event.duration < 0.5 - 1e-6:
+            sixteenth_notes += 1
+        if units % 2 == 1 and units > 1:
+            dotted_notes += 1
+        if event.duration >= 2.0 - 1e-6:
+            long_notes += 1
+        beat_phase = round(event.offset % 1.0, 6)
+        if beat_phase in {0.25, 0.75}:
+            syncopated_onsets += 1
+        if abs(beat_phase - 0.5) < 1e-6 and int(event.offset) < int(event.end - 1e-6):
+            beat_crossing_syncopations += 1
+    return {
+        "sixteenth_notes": sixteenth_notes,
+        "dotted_notes": dotted_notes,
+        "long_notes": long_notes,
+        "syncopated_onsets": syncopated_onsets,
+        "beat_crossing_syncopations": beat_crossing_syncopations,
+    }
+
+
+def _rhythm_independence(fugue: GeneratedFugue) -> dict[str, float]:
+    starts_by_time: dict[float, int] = {}
+    starts = 0
+    for voice in fugue.voices:
+        for event in voice.events:
+            if event.pitch is None or event.label != "free counterpoint":
+                continue
+            starts += 1
+            key = round(event.offset, 6)
+            starts_by_time[key] = starts_by_time.get(key, 0) + 1
+    aligned_starts = sum(count for count in starts_by_time.values() if count >= 2)
+    return {
+        "free_note_starts": starts,
+        "shared_start_times": sum(1 for count in starts_by_time.values() if count >= 2),
+        "aligned_start_fraction": round(aligned_starts / max(1, starts), 3),
+    }
 
 
 def _histogram(values) -> dict[str, int]:

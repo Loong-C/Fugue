@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from fugue_generator.export import write_midi
-from fugue_generator.generator import FugueGenerator, FugueRequest
+from fugue_generator.generator import (
+    FugueGenerator,
+    FugueRequest,
+    _directional_scale_snap,
+    _merge_sustained_free_repetitions,
+)
+from fugue_generator.models import MusicalEvent, VoiceLine, VoiceSpec
 from fugue_generator.style import (
     DEFAULT_DURATION_WEIGHTS,
     DEFAULT_INTERVAL_WEIGHTS,
@@ -24,6 +30,34 @@ def _test_style() -> CorpusStyleModel:
         dict(DEFAULT_DURATION_WEIGHTS),
         source="test",
     )
+
+
+def test_directional_scale_snap_preserves_melodic_direction() -> None:
+    key = KeyContext("C", "minor")
+
+    assert _directional_scale_snap(key, 60, 1) > 60
+    assert _directional_scale_snap(key, 60, -1) < 60
+    assert _directional_scale_snap(key, 60, 0) == 60
+
+
+def test_sustained_free_repetitions_are_tied() -> None:
+    line = VoiceLine(
+        VoiceSpec("test", 48, 72, 60),
+        [
+            MusicalEvent(0.0, 1.0, 60, "free counterpoint"),
+            MusicalEvent(1.0, 2.0, 60, "free counterpoint"),
+            MusicalEvent(3.0, 0.5, 62, "free counterpoint"),
+            MusicalEvent(3.5, 0.25, 62, "free counterpoint"),
+        ],
+    )
+
+    _merge_sustained_free_repetitions([line])
+
+    assert line.events[0] == MusicalEvent(0.0, 3.0, 60, "free counterpoint")
+    assert line.events[1:] == [
+        MusicalEvent(3.0, 0.5, 62, "free counterpoint"),
+        MusicalEvent(3.5, 0.25, 62, "free counterpoint"),
+    ]
 
 
 def test_generate_three_voice_fugue_has_clean_entries(tmp_path: Path) -> None:
